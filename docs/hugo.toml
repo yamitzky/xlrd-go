@@ -1,7 +1,7 @@
 baseURL = "/"
 languageCode = "en-us"
 title = "xlrd-go"
-paginate = 20
+pagination.pagerSize = 20
 enableRobotsTXT = true
 disableKinds = ["taxonomy", "term"]
 
