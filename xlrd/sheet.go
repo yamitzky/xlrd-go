@@ -49,8 +49,8 @@ type Sheet struct {
 	MergedCells [][4]int
 
 	// Cell data storage (similar to Python's _cell_values, _cell_types, _cell_xf_indexes)
-	cellValues   [][]interface{}
-	cellTypes    [][]int
+	cellValues    [][]interface{}
+	cellTypes     [][]int
 	cellXFIndexes [][]int
 
 	// Cached magnification factors from WINDOW2 record
@@ -133,6 +133,21 @@ func (s *Sheet) CellValue(rowx, colx int) interface{} {
 	return value
 }
 
+// RawCellValue returns the cell value without merged-cell expansion.
+func (s *Sheet) RawCellValue(rowx, colx int) interface{} {
+	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
+		return nil
+	}
+	if rowx >= len(s.cellValues) || s.cellValues[rowx] == nil || colx >= len(s.cellValues[rowx]) {
+		return ""
+	}
+	value := s.cellValues[rowx][colx]
+	if value == nil {
+		return ""
+	}
+	return value
+}
+
 // CellType returns the type of the cell at the given row and column.
 func (s *Sheet) CellType(rowx, colx int) int {
 	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
@@ -151,6 +166,17 @@ func (s *Sheet) CellType(rowx, colx int) int {
 		}
 	}
 
+	if rowx >= len(s.cellTypes) || s.cellTypes[rowx] == nil || colx >= len(s.cellTypes[rowx]) {
+		return XL_CELL_EMPTY
+	}
+	return s.cellTypes[rowx][colx]
+}
+
+// RawCellType returns the cell type without merged-cell expansion.
+func (s *Sheet) RawCellType(rowx, colx int) int {
+	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
+		return XL_CELL_EMPTY
+	}
 	if rowx >= len(s.cellTypes) || s.cellTypes[rowx] == nil || colx >= len(s.cellTypes[rowx]) {
 		return XL_CELL_EMPTY
 	}
@@ -381,6 +407,17 @@ func (s *Sheet) CellXFIndex(rowx, colx int) int {
 	return s.cellXFIndexes[rowx][colx]
 }
 
+// RawCellXFIndex returns the XF index without merged-cell expansion.
+func (s *Sheet) RawCellXFIndex(rowx, colx int) int {
+	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
+		return 0
+	}
+	if rowx >= len(s.cellXFIndexes) || s.cellXFIndexes[rowx] == nil || colx >= len(s.cellXFIndexes[rowx]) || s.cellXFIndexes[rowx][colx] == 0 {
+		return 15
+	}
+	return s.cellXFIndexes[rowx][colx]
+}
+
 // EmptyCell returns an empty cell.
 func EmptyCell() *Cell {
 	return &Cell{CType: XL_CELL_EMPTY}
@@ -446,7 +483,6 @@ func (s *Sheet) read(bk *Book) error {
 			break
 		}
 
-
 		// Debug for column B records
 		switch rc {
 		case XL_NUMBER, XL_NUMBER_B2:
@@ -456,7 +492,7 @@ func (s *Sheet) read(bk *Book) error {
 				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
 				bits := binary.LittleEndian.Uint64(data[6:14])
 				value := math.Float64frombits(bits)
-				if s.Name == "PROFILEDEF" {
+				if bk.verbosity >= 2 && s.Name == "PROFILEDEF" {
 					fmt.Fprintf(bk.logfile, "DEBUG: %s XL_NUMBER at (%d,%d): value=%f, xf=%d\n", s.Name, rowx, colx, value, xfIndex)
 				}
 				s.putCell(rowx, colx, XL_CELL_NUMBER, value, xfIndex)
@@ -479,8 +515,8 @@ func (s *Sheet) read(bk *Book) error {
 				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
 				rkData := data[6:10]
 				rkValue := unpackRK(rkData)
-				if s.Name == "PROFILEDEF" || rkValue == 100.0 {
-					fmt.Printf("DEBUG: %s XL_RK at (%d,%d): rkData=%x, value=%f, xf=%d\n", s.Name, rowx, colx, rkData, rkValue, xfIndex)
+				if bk.verbosity >= 2 && (s.Name == "PROFILEDEF" || rkValue == 100.0) {
+					fmt.Fprintf(bk.logfile, "DEBUG: %s XL_RK at (%d,%d): rkData=%x, value=%f, xf=%d\n", s.Name, rowx, colx, rkData, rkValue, xfIndex)
 				}
 				s.putCell(rowx, colx, XL_CELL_NUMBER, rkValue, xfIndex)
 			}
@@ -555,7 +591,7 @@ func (s *Sheet) handleFormula(bk *Book, data []byte, dataLen int) {
 	rowx := int(binary.LittleEndian.Uint16(data[0:2]))
 	colx := int(binary.LittleEndian.Uint16(data[2:4]))
 	xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
-	resultStr := data[6:14] // 8 bytes of cached result
+	resultStr := data[6:14]                     // 8 bytes of cached result
 	_ = binary.LittleEndian.Uint16(data[14:16]) // flags (unused for now)
 
 	// Formula record parsed

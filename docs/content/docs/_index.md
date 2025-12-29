@@ -5,6 +5,7 @@ title: "Documentation"
 Start here, then dive into the details:
 
 - [Overview](overview/)
+- [CLI](cli/)
 - [Handling Unicode](unicode/)
 - [Excel Dates](dates/)
 - [Named References](references/)

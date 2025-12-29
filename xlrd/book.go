@@ -392,7 +392,13 @@ func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) 
 		options.Logfile = os.Stdout
 	}
 
-	fileFormat, err := InspectFormat(filename, nil)
+	var fileFormat string
+	var err error
+	if options.FileContents != nil {
+		fileFormat, err = InspectFormat("", options.FileContents)
+	} else {
+		fileFormat, err = InspectFormat(filename, nil)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -436,9 +442,15 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 	bk.ignoreWorkbookCorruption = options.IgnoreWorkbookCorruption
 
 	// Read file
-	fileContents, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, err
+	var err error
+	var fileContents []byte
+	if options.FileContents != nil {
+		fileContents = options.FileContents
+	} else {
+		fileContents, err = os.ReadFile(filename)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if len(fileContents) == 0 {
@@ -958,7 +970,7 @@ func (b *Book) handleFormat(data []byte) error {
 	pos := 0
 
 	// Format index (2 bytes, but we use the list position)
-	// format.FormatKey = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	format.FormatKey = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 	pos += 2
 
 	// Format string
@@ -982,6 +994,9 @@ func (b *Book) handleFormat(data []byte) error {
 	}
 
 	b.FormatList = append(b.FormatList, format)
+	if b.FormatMap != nil {
+		b.FormatMap[format.FormatKey] = format
+	}
 	return nil
 }
 

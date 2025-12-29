@@ -52,3 +52,25 @@ func main() {
 ```
 
 Documentation lives under `docs/` and is built with Hugo.
+
+## CLI: xls2csv
+
+This repo also ships a CLI named `xls2csv` for converting legacy `.xls` files
+to CSV. The interface is flavored after
+https://github.com/dilshod/xlsx2csv.
+
+```bash
+go install github.com/yamitzky/xlrd-go/cmd/xls2csv@latest
+```
+
+```bash
+xls2csv -s 1 input.xls output.csv
+xls2csv -a input.xls
+xls2csv -s 0 input.xls outdir
+```
+
+Notes:
+
+- Only `.xls` files are supported.
+- `--outputencoding` currently supports `utf-8` only.
+- `--hyperlinks` is parsed but not supported yet.

@@ -48,3 +48,20 @@ func main() {
     fmt.Printf("Cell D30: %v\n", sheet.CellValue(29, 3))
 }
 ```
+
+## CLI: xls2csv
+
+`xls2csv` converts `.xls` files into CSV. The interface is flavored after
+https://github.com/dilshod/xlsx2csv.
+
+```bash
+xls2csv -s 1 input.xls output.csv
+xls2csv -a input.xls
+xls2csv -s 0 input.xls outdir
+```
+
+Notes:
+
+- Only `.xls` files are supported.
+- `--outputencoding` currently supports `utf-8` only.
+- `--hyperlinks` is parsed but not supported yet.
