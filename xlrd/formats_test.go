@@ -182,13 +182,15 @@ func TestGetFromMergedCell(t *testing.T) {
 		t.Fatalf("Failed to get sheet: %v", err)
 	}
 	cell := sheet.Cell(2, 2)
-	// For now, just check that cell exists and has some data
-	// Merged cell handling is not fully implemented yet
-	if cell == nil {
-		t.Error("sheet.Cell(2, 2) should not be nil")
+	if cell.CType != XL_CELL_TEXT {
+		t.Errorf("cell.CType = %d, want %d", cell.CType, XL_CELL_TEXT)
 	}
-	// TODO: Implement proper merged cell handling
-	t.Skip("Merged cell handling not yet implemented")
+	if cell.Value != "MERGED CELLS" {
+		t.Errorf("cell.Value = %v, want %s", cell.Value, "MERGED CELLS")
+	}
+	if cell.XFIndex <= 0 {
+		t.Errorf("cell.XFIndex = %d, want > 0", cell.XFIndex)
+	}
 }
 
 func TestIgnoreDiagram(t *testing.T) {

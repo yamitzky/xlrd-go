@@ -106,6 +106,23 @@ func (s *Sheet) CellValue(rowx, colx int) interface{} {
 	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
 		return nil
 	}
+
+	// Check if this cell is within a merged cell range
+	for _, mergedRange := range s.MergedCells {
+		rlo, rhi, clo, chi := mergedRange[0], mergedRange[1], mergedRange[2], mergedRange[3]
+		if rlo <= rowx && rowx < rhi && clo <= colx && colx < chi {
+			// This cell is within a merged range, return the value from the top-left cell
+			if rlo >= len(s.cellValues) || s.cellValues[rlo] == nil || clo >= len(s.cellValues[rlo]) {
+				return ""
+			}
+			value := s.cellValues[rlo][clo]
+			if value == nil {
+				return ""
+			}
+			return value
+		}
+	}
+
 	if rowx >= len(s.cellValues) || s.cellValues[rowx] == nil || colx >= len(s.cellValues[rowx]) {
 		return ""
 	}
@@ -118,7 +135,23 @@ func (s *Sheet) CellValue(rowx, colx int) interface{} {
 
 // CellType returns the type of the cell at the given row and column.
 func (s *Sheet) CellType(rowx, colx int) int {
-	if rowx < 0 || rowx >= len(s.cellTypes) || s.cellTypes[rowx] == nil || colx < 0 || colx >= len(s.cellTypes[rowx]) {
+	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
+		return XL_CELL_EMPTY
+	}
+
+	// Check if this cell is within a merged cell range
+	for _, mergedRange := range s.MergedCells {
+		rlo, rhi, clo, chi := mergedRange[0], mergedRange[1], mergedRange[2], mergedRange[3]
+		if rlo <= rowx && rowx < rhi && clo <= colx && colx < chi {
+			// This cell is within a merged range, return the type from the top-left cell
+			if rlo >= len(s.cellTypes) || s.cellTypes[rlo] == nil || clo >= len(s.cellTypes[rlo]) {
+				return XL_CELL_EMPTY
+			}
+			return s.cellTypes[rlo][clo]
+		}
+	}
+
+	if rowx >= len(s.cellTypes) || s.cellTypes[rowx] == nil || colx >= len(s.cellTypes[rowx]) {
 		return XL_CELL_EMPTY
 	}
 	return s.cellTypes[rowx][colx]
@@ -320,6 +353,23 @@ func (s *Sheet) CellXFIndex(rowx, colx int) int {
 	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
 		return 0
 	}
+
+	// Check if this cell is within a merged cell range
+	for _, mergedRange := range s.MergedCells {
+		rlo, rhi, clo, chi := mergedRange[0], mergedRange[1], mergedRange[2], mergedRange[3]
+		if rlo <= rowx && rowx < rhi && clo <= colx && colx < chi {
+			// This cell is within a merged range, return the XF index from the top-left cell
+			if rlo >= len(s.cellXFIndexes) || s.cellXFIndexes[rlo] == nil || clo >= len(s.cellXFIndexes[rlo]) {
+				return 15 // Default XF index for empty cells
+			}
+			xfIndex := s.cellXFIndexes[rlo][clo]
+			if xfIndex == 0 {
+				return 15 // Default XF index for empty cells
+			}
+			return xfIndex
+		}
+	}
+
 	if rowx >= len(s.cellXFIndexes) || s.cellXFIndexes[rowx] == nil || colx >= len(s.cellXFIndexes[rowx]) || s.cellXFIndexes[rowx][colx] == 0 {
 		return 15 // Default XF index for empty cells
 	}
