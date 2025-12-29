@@ -11,12 +11,12 @@ From the repository root:
 
 ```bash
 go test ./...
+```
 
 ## Formatting
 
 ```bash
 gofmt -w .
-```
 ```
 
 ## Building documentation
