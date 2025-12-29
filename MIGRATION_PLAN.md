@@ -211,9 +211,129 @@ Potential Go dependencies:
 - `github.com/stretchr/testify` - Testing utilities (optional)
 - Standard library only preferred
 
+## CI/CD Configuration Migration
+
+### Current CircleCI Setup (Python)
+- **Test Matrix**: Python 2.7, 3.6, 3.9
+- **Coverage**: Coverage.py with Codecov integration
+- **Documentation**: Sphinx-based docs
+- **Packaging**: setuptools-based wheel and source distribution
+- **Release**: Carthorse-based automated releases
+
+### Target GitHub Actions Setup (Go)
+- **Test Matrix**: Go 1.19, 1.20, 1.21 (latest stable versions)
+- **Coverage**: Go native coverage with Codecov integration
+- **Documentation**: Hugo-based docs
+- **Packaging**: Go modules with goreleaser
+- **Release**: GoReleaser-based automated releases
+- **Quality Checks**: gofmt, go vet, golint
+
+#### GitHub Actions Workflows to Create:
+
+1. **CI Workflow** (`.github/workflows/ci.yml`):
+   ```yaml
+   name: CI
+   on: [push, pull_request]
+   jobs:
+     test:
+       runs-on: ubuntu-latest
+       strategy:
+         matrix:
+           go-version: ['1.19', '1.20', '1.21']
+       steps:
+         - uses: actions/checkout@v4
+         - name: Set up Go
+           uses: actions/setup-go@v4
+           with:
+             go-version: ${{ matrix.go-version }}
+         - name: Run tests
+           run: go test ./...
+         - name: Run tests with coverage
+           run: go test -coverprofile=coverage.out ./...
+         - name: Upload coverage to Codecov
+           uses: codecov/codecov-action@v3
+           with:
+             file: ./coverage.out
+
+     lint:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+         - name: Set up Go
+           uses: actions/setup-go@v4
+           with:
+             go-version: '1.21'
+         - name: Run gofmt
+           run: gofmt -d .
+         - name: Run go vet
+           run: go vet ./...
+         - name: Run golint
+           run: golint ./...
+   ```
+
+2. **Release Workflow** (`.github/workflows/release.yml`):
+   ```yaml
+   name: Release
+   on:
+     push:
+       tags: ['v*']
+   jobs:
+     release:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+         - name: Set up Go
+           uses: actions/setup-go@v4
+           with:
+             go-version: '1.21'
+         - name: Run GoReleaser
+           uses: goreleaser/goreleaser-action@v5
+           with:
+             version: latest
+             args: release --clean
+           env:
+             GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+   ```
+
+3. **Docs Workflow** (`.github/workflows/docs.yml`):
+   ```yaml
+   name: Docs
+   on:
+     push:
+       branches: [main]
+     pull_request:
+       branches: [main]
+   jobs:
+     docs:
+       runs-on: ubuntu-latest
+       steps:
+         - uses: actions/checkout@v4
+         - name: Set up Hugo
+           uses: peaceiris/actions-hugo@v2
+           with:
+             hugo-version: 'latest'
+         - name: Build docs
+           run: hugo --source docs/
+         - name: Deploy to GitHub Pages
+           if: github.ref == 'refs/heads/main'
+           uses: peaceiris/actions-gh-pages@v3
+           with:
+             github_token: ${{ secrets.GITHUB_TOKEN }}
+             publish_dir: ./docs/public
+   ```
+
+### Migration Steps for CI/CD:
+1. Create `.github/workflows/` directory
+2. Create CI workflow for testing and linting
+3. Create release workflow with GoReleaser
+4. Create docs workflow for Hugo deployment
+5. Configure Codecov integration for Go coverage
+6. Update repository settings for GitHub Pages
+7. Remove CircleCI configuration after migration
+
 ## Notes
 
 - Keep Python files during migration for reference
 - Remove Python files only after full migration is complete
 - Maintain git history where possible
-- Update CI/CD configuration for Go
+- Migrate CI/CD from CircleCI to GitHub Actions for Go
