@@ -95,10 +95,17 @@ type RowInfo struct {
 
 // CellValue returns the value of the cell at the given row and column.
 func (s *Sheet) CellValue(rowx, colx int) interface{} {
-	if rowx < 0 || rowx >= len(s.cellValues) || colx < 0 || colx >= len(s.cellValues[rowx]) {
+	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
 		return nil
 	}
-	return s.cellValues[rowx][colx]
+	if rowx >= len(s.cellValues) || colx >= len(s.cellValues[rowx]) {
+		return ""
+	}
+	value := s.cellValues[rowx][colx]
+	if value == nil {
+		return ""
+	}
+	return value
 }
 
 // CellType returns the type of the cell at the given row and column.
@@ -302,8 +309,11 @@ func (s *Sheet) ColTypes(colx, startRowx int, endRowx *int) []int {
 
 // CellXFIndex returns the XF index of the cell at the given row and column.
 func (s *Sheet) CellXFIndex(rowx, colx int) int {
-	if rowx < 0 || rowx >= len(s.cellXFIndexes) || colx < 0 || colx >= len(s.cellXFIndexes[rowx]) {
+	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
 		return 0
+	}
+	if rowx >= len(s.cellXFIndexes) || colx >= len(s.cellXFIndexes[rowx]) || s.cellXFIndexes[rowx][colx] == 0 {
+		return 15 // Default XF index for empty cells
 	}
 	return s.cellXFIndexes[rowx][colx]
 }

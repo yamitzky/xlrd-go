@@ -336,9 +336,9 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 			return nil, NewXLRDError("Can't find workbook in OLE2 compound document")
 		}
 		
-		bk.mem = mem
-		bk.base = base
-		bk.streamLen = streamLen
+	bk.mem = mem
+	bk.base = base
+	bk.streamLen = streamLen
 	} else {
 		// Not an OLE2 compound document - treat as raw BIFF file
 		bk.mem = fileContents
@@ -463,7 +463,7 @@ func (b *Book) getBOF(rqdStream int) (int, error) {
 	version1 := opcode >> 8
 	version2 := binary.LittleEndian.Uint16(data[0:2])
 	streamtype := binary.LittleEndian.Uint16(data[2:4])
-	
+
 	if streamtype != uint16(rqdStream) {
 		return 0, NewXLRDError("BOF record stream type mismatch: expected 0x%04x, got 0x%04x", rqdStream, streamtype)
 	}
@@ -1080,7 +1080,7 @@ func (b *Book) getSheet(shNumber int) (*Sheet, error) {
 	}
 	
 	b.position = b.sheetAbsPosn[shNumber]
-	
+
 	// Get BOF record for worksheet
 	_, err := b.getBOF(XL_WORKSHEET)
 	if err != nil {
