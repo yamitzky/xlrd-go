@@ -1,4 +1,4 @@
-baseURL = "/"
+baseURL = "https://yamitzky.github.io/xlrd-go/"
 languageCode = "en-us"
 title = "xlrd-go"
 pagination.pagerSize = 20
