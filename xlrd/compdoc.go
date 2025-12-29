@@ -9,11 +9,11 @@ import (
 )
 
 const (
-	EOCSID   = -2 // End of chain
-	FREESID  = -1 // Free sector
-	SATSID   = -3 // Sector allocation table
-	MSATSID  = -4 // Master sector allocation table
-	EVILSID  = -5 // Invalid sector
+	EOCSID  = -2 // End of chain
+	FREESID = -1 // Free sector
+	SATSID  = -3 // Sector allocation table
+	MSATSID = -4 // Master sector allocation table
+	EVILSID = -5 // Invalid sector
 )
 
 // CompDocError represents an error in compound document handling.
@@ -54,16 +54,16 @@ type CompDoc struct {
 	IgnoreWorkbookCorruption bool
 
 	// Internal fields
-	secSize        int
-	shortSecSize   int
-	SAT            []int
-	SSAT           []int
-	SSCS           []byte
-	dirList        []*DirNode
-	memDataSecs    int
-	memDataLen     int
+	secSize          int
+	shortSecSize     int
+	SAT              []int
+	SSAT             []int
+	SSCS             []byte
+	dirList          []*DirNode
+	memDataSecs      int
+	memDataLen       int
 	minSizeStdStream int
-	seen           []int
+	seen             []int
 }
 
 // LocateNamedStream locates a named stream in the compound document.
@@ -114,11 +114,11 @@ func (cd *CompDoc) dirSearch(path []string, storageDID int) *DirNode {
 	if len(path) == 0 {
 		return nil
 	}
-	
+
 	head := strings.ToLower(path[0])
 	tail := path[1:]
 	dl := cd.dirList
-	
+
 	for _, child := range dl[storageDID].Children {
 		if strings.ToLower(dl[child].Name) == head {
 			et := dl[child].EType
@@ -139,6 +139,60 @@ func (cd *CompDoc) dirSearch(path []string, storageDID int) *DirNode {
 		}
 	}
 	return nil
+}
+
+func xDumpLine(alist []int, stride int, f io.Writer, dpos int, equal bool) {
+	marker := " "
+	if equal {
+		marker = "="
+	}
+	fmt.Fprintf(f, "%5d%s ", dpos, marker)
+	for _, value := range alist[dpos:minInt(dpos+stride, len(alist))] {
+		fmt.Fprintf(f, "%d ", value)
+	}
+	fmt.Fprintln(f)
+}
+
+func dumpList(alist []int, stride int, f io.Writer) {
+	pos := -1
+	oldpos := -1
+	for pos = 0; pos < len(alist); pos += stride {
+		if oldpos == -1 {
+			xDumpLine(alist, stride, f, pos, false)
+			oldpos = pos
+			continue
+		}
+		if !intSliceEqual(alist[oldpos:minInt(oldpos+stride, len(alist))],
+			alist[pos:minInt(pos+stride, len(alist))]) {
+			if pos-oldpos > stride {
+				xDumpLine(alist, stride, f, pos-stride, true)
+			}
+			xDumpLine(alist, stride, f, pos, false)
+			oldpos = pos
+		}
+	}
+	if oldpos != -1 && pos != -1 && pos != oldpos {
+		xDumpLine(alist, stride, f, pos, true)
+	}
+}
+
+func intSliceEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // locateStream locates a stream and returns (mem, base, streamLen).
@@ -256,7 +310,7 @@ func (cd *CompDoc) getStream(mem []byte, base int, sat []int, secSize int, start
 			break
 		}
 	}
-	
+
 	result := make([]byte, 0, size)
 	for _, sector := range sectors {
 		result = append(result, sector...)
@@ -269,40 +323,40 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 	if len(mem) < 8 {
 		return nil, &CompDocError{Message: "File too short to be an OLE2 compound document"}
 	}
-	
+
 	if string(mem[:8]) != string(XLS_SIGNATURE) {
 		return nil, &CompDocError{Message: "Not an OLE2 compound document"}
 	}
-	
+
 	if len(mem) < 76 {
 		return nil, &CompDocError{Message: "File too short"}
 	}
-	
+
 	if mem[28] != 0xFE || mem[29] != 0xFF {
 		return nil, &CompDocError{Message: "Expected little-endian marker"}
 	}
-	
+
 	cd := &CompDoc{
 		Mem:                      mem,
 		Logfile:                  logfile,
 		DEBUG:                    debug,
 		IgnoreWorkbookCorruption: ignoreWorkbookCorruption,
 	}
-	
+
 	// Parse header
 	ssz := int(binary.LittleEndian.Uint16(mem[30:32]))
 	sssz := int(binary.LittleEndian.Uint16(mem[32:34]))
-	
+
 	if ssz > 20 {
 		ssz = 9 // Default to 512 bytes
 	}
 	if sssz > ssz {
 		sssz = 6 // Default to 64 bytes
 	}
-	
+
 	cd.secSize = 1 << ssz
 	cd.shortSecSize = 1 << sssz
-	
+
 	// Parse header fields
 	_ = int(binary.LittleEndian.Uint32(mem[44:48])) // SATTotSecs - not used yet
 	dirFirstSecSID := int(binary.LittleEndian.Uint32(mem[48:52]))
@@ -311,43 +365,43 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 	SSATTotSecs := int(binary.LittleEndian.Uint32(mem[64:68]))
 	_ = int(binary.LittleEndian.Uint32(mem[68:72])) // MSATXFirstSecSID - not used yet
 	_ = int(binary.LittleEndian.Uint32(mem[72:76])) // MSATXTotSecs - not used yet
-	
+
 	memDataLen := len(mem) - 512
 	memDataSecs := (memDataLen + cd.secSize - 1) / cd.secSize
 	cd.memDataSecs = memDataSecs
 	cd.memDataLen = memDataLen
 	cd.seen = make([]int, memDataSecs)
-	
+
 	// Build MSAT (Master Sector Allocation Table)
 	MSAT := make([]int, 109)
 	for i := 0; i < 109; i++ {
 		MSAT[i] = int(int32(binary.LittleEndian.Uint32(mem[76+i*4 : 80+i*4])))
 	}
 
-		// Handle MSAT extensions if present
-		MSATXFirstSecSID := int(int32(binary.LittleEndian.Uint32(mem[68:72])))
-		MSATXTotSecs := int(binary.LittleEndian.Uint32(mem[72:76]))
+	// Handle MSAT extensions if present
+	MSATXFirstSecSID := int(int32(binary.LittleEndian.Uint32(mem[68:72])))
+	MSATXTotSecs := int(binary.LittleEndian.Uint32(mem[72:76]))
 
-		// Check if MSAT extension exists
-		hasMSATExt := true
-		if MSATXTotSecs == 0 && (MSATXFirstSecSID == EOCSID || MSATXFirstSecSID == FREESID || MSATXFirstSecSID == 0) {
-			hasMSATExt = false // No extension
-		}
+	// Check if MSAT extension exists
+	hasMSATExt := true
+	if MSATXTotSecs == 0 && (MSATXFirstSecSID == EOCSID || MSATXFirstSecSID == FREESID || MSATXFirstSecSID == 0) {
+		hasMSATExt = false // No extension
+	}
 
-		if hasMSATExt {
-			sid := MSATXFirstSecSID
-			for sid != EOCSID && sid != FREESID && sid != MSATSID {
-				if sid >= memDataSecs {
-					break // Invalid sector
-				}
-				if sid < 0 {
-					break // Invalid sector
-				}
-				if cd.seen[sid] != 0 {
-					// Corruption detected in MSAT
-					break
-				}
-				cd.seen[sid] = 1
+	if hasMSATExt {
+		sid := MSATXFirstSecSID
+		for sid != EOCSID && sid != FREESID && sid != MSATSID {
+			if sid >= memDataSecs {
+				break // Invalid sector
+			}
+			if sid < 0 {
+				break // Invalid sector
+			}
+			if cd.seen[sid] != 0 {
+				// Corruption detected in MSAT
+				break
+			}
+			cd.seen[sid] = 1
 
 			offset := 512 + sid*cd.secSize
 			if offset+cd.secSize > len(mem) {
@@ -361,7 +415,7 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 			}
 
 			MSAT = append(MSAT, extMSAT[:len(extMSAT)-1]...) // Last entry is next sector pointer
-			sid = extMSAT[len(extMSAT)-1] // Next sector in chain
+			sid = extMSAT[len(extMSAT)-1]                    // Next sector in chain
 		}
 	}
 
@@ -391,7 +445,7 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		}
 		cd.SAT = append(cd.SAT, sector...)
 	}
-	
+
 	// Build directory - need to calculate directory size first
 	// Directory is typically multiple sectors, but we'll read until we hit EOCSID
 	dirSize := 0
@@ -406,13 +460,13 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 	}
 	dirBytes := cd.getStream(mem, 512, cd.SAT, cd.secSize, dirFirstSecSID, dirSize, "directory", 3)
 	cd.dirList = make([]*DirNode, 0)
-	
+
 	for pos := 0; pos < len(dirBytes); pos += 128 {
 		if pos+128 > len(dirBytes) {
 			break
 		}
 		dent := dirBytes[pos : pos+128]
-		
+
 		cbufsize := binary.LittleEndian.Uint16(dent[64:66])
 		etype := int(dent[66])
 		leftDID := int(int32(binary.LittleEndian.Uint32(dent[68:72])))
@@ -420,7 +474,7 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		rootDID := int(int32(binary.LittleEndian.Uint32(dent[76:80])))
 		firstSID := int(int32(binary.LittleEndian.Uint32(dent[116:120])))
 		totSize := int(int32(binary.LittleEndian.Uint32(dent[120:124])))
-		
+
 		var name string
 		if cbufsize > 0 && cbufsize <= 64 {
 			nameBytes := dent[0 : cbufsize-2]
@@ -433,7 +487,7 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 				name = string(utf16.Decode(words))
 			}
 		}
-		
+
 		did := len(cd.dirList)
 		dn := &DirNode{
 			DID:      did,
@@ -449,12 +503,12 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		}
 		cd.dirList = append(cd.dirList, dn)
 	}
-	
+
 	// Build family tree
 	if len(cd.dirList) > 0 {
 		cd.buildFamilyTree(0, cd.dirList[0].rootDID)
 	}
-	
+
 	// Get SSCS (Short Stream Container Stream)
 	if len(cd.dirList) > 0 {
 		sscsDir := cd.dirList[0]
@@ -463,7 +517,7 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		} else {
 			cd.SSCS = []byte{}
 		}
-		
+
 		// Build SSAT (Short Sector Allocation Table)
 		cd.SSAT = make([]int, 0)
 		if SSATTotSecs > 0 && len(cd.SSCS) > 0 {
@@ -487,7 +541,7 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 			}
 		}
 	}
-	
+
 	return cd, nil
 }
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
+	"sort"
 	"strings"
 	"unicode/utf16"
 
@@ -83,6 +85,9 @@ type Book struct {
 	// PaletteRecord contains RGB values if the user has changed any colours.
 	PaletteRecord [][3]int
 
+	// ColourIndexesUsed tracks which colour indexes are referenced by formatting records.
+	ColourIndexesUsed map[int]bool
+
 	// LoadTimeStage1 is the time in seconds to extract the XLS image as a contiguous string.
 	LoadTimeStage1 float64
 
@@ -121,6 +126,10 @@ type Book struct {
 	builtinfmtcount int // number of built-in formats (BIFF 3, 4S, 4W)
 	sheethdrCount   int // BIFF 4W only
 	sheetsoffset    int // sheet offset for BIFF 4W
+	xfCount         int // number of XF records seen so far
+	actualFmtCount  int // number of FORMAT records seen so far
+
+	xfIndexToXLTypeMap map[int]int
 
 	// External reference handling
 	supbookCount       int
@@ -708,6 +717,14 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 
 		switch code {
 		case XL_EOF:
+			if !b.xfEpilogueDone {
+				b.xfEpilogue()
+			}
+			b.namesEpilogue()
+			b.paletteEpilogue()
+			if b.Encoding == "" {
+				b.Encoding = b.deriveEncoding()
+			}
 			break
 		case XL_BOUNDSHEET:
 			err := b.handleBoundsheet(data)
@@ -727,8 +744,18 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 			if err != nil {
 				return err
 			}
+		case XL_EFONT:
+			err := b.handleEFont(data)
+			if err != nil {
+				return err
+			}
 		case XL_FORMAT:
-			err := b.handleFormat(data)
+			err := b.handleFormat(data, XL_FORMAT)
+			if err != nil {
+				return err
+			}
+		case XL_FORMAT2:
+			err := b.handleFormat(data, XL_FORMAT2)
 			if err != nil {
 				return err
 			}
@@ -897,176 +924,686 @@ func (b *Book) handleCountry(data []byte) {
 
 // handleFont handles a FONT record.
 func (b *Book) handleFont(data []byte) error {
-	if len(data) < 14 {
-		return nil // Not enough data
+	if !b.formattingInfo {
+		return nil
+	}
+	if b.Encoding == "" {
+		b.Encoding = b.deriveEncoding()
 	}
 
-	font := &Font{}
-	pos := 0
-
-	// Height (2 bytes, little endian)
-	font.Height = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	pos += 2
-
-	// Option flags (2 bytes)
-	options := binary.LittleEndian.Uint16(data[pos : pos+2])
-	pos += 2
-
-	font.Bold = (options & 0x0001) != 0
-	font.Italic = (options & 0x0002) != 0
-	font.Underline = int((options & 0x000C) >> 2)
-	font.Escapement = int((options & 0x0070) >> 4)
-
-	// Colour index (2 bytes)
-	font.ColourIndex = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	pos += 2
-
-	// Weight (2 bytes)
-	font.Weight = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	pos += 2
-
-	// Escapement (1 byte, already handled in options)
-	pos += 1
-
-	// Underline (1 byte, already handled in options)
-	pos += 1
-
-	// Family (1 byte)
-	font.Family = int(data[pos])
-	pos += 1
-
-	// Character set (1 byte)
-	font.CharacterSet = int(data[pos])
-	pos += 1
-
-	// Reserved (1 byte)
-	pos += 1
-
-	// Font name length (1 byte)
-	nameLen := int(data[pos])
-	pos += 1
-
-	// Font name
-	if pos+nameLen <= len(data) {
-		// For BIFF8, font name is UTF-16LE encoded
-		if b.BiffVersion >= 80 {
-			font.Name = string(data[pos : pos+nameLen])
-		} else {
-			font.Name = string(data[pos : pos+nameLen])
+	k := len(b.FontList)
+	if k == 4 {
+		dummy := &Font{
+			Name:      "Dummy Font",
+			FontIndex: k,
 		}
+		b.FontList = append(b.FontList, dummy)
+		k++
+	}
+
+	font := &Font{FontIndex: k}
+	bv := b.BiffVersion
+
+	if bv >= 50 {
+		if len(data) < 14 {
+			return nil
+		}
+		font.Height = int(binary.LittleEndian.Uint16(data[0:2]))
+		optionFlags := binary.LittleEndian.Uint16(data[2:4])
+		font.ColourIndex = int(binary.LittleEndian.Uint16(data[4:6]))
+		font.Weight = int(binary.LittleEndian.Uint16(data[6:8]))
+		font.Escapement = int(binary.LittleEndian.Uint16(data[8:10]))
+		font.Underline = int(data[10])
+		font.Family = int(data[11])
+		font.CharacterSet = int(data[12])
+
+		font.Bold = (optionFlags & 0x0001) != 0
+		font.Italic = (optionFlags & 0x0002) != 0
+		font.Underlined = (optionFlags & 0x0004) != 0
+		font.StruckOut = (optionFlags & 0x0008) != 0
+		font.Outline = (optionFlags & 0x0010) != 0
+		font.Shadow = (optionFlags & 0x0020) != 0
+
+		var err error
+		if bv >= 80 {
+			font.Name, err = UnpackUnicode(data, 14, 1)
+		} else {
+			font.Name, err = UnpackString(data, 14, b.Encoding, 1)
+		}
+		if err != nil {
+			return err
+		}
+	} else if bv >= 30 {
+		if len(data) < 6 {
+			return nil
+		}
+		font.Height = int(binary.LittleEndian.Uint16(data[0:2]))
+		optionFlags := binary.LittleEndian.Uint16(data[2:4])
+		font.ColourIndex = int(binary.LittleEndian.Uint16(data[4:6]))
+
+		font.Bold = (optionFlags & 0x0001) != 0
+		font.Italic = (optionFlags & 0x0002) != 0
+		font.Underlined = (optionFlags & 0x0004) != 0
+		font.StruckOut = (optionFlags & 0x0008) != 0
+		font.Outline = (optionFlags & 0x0010) != 0
+		font.Shadow = (optionFlags & 0x0020) != 0
+
+		name, err := UnpackString(data, 6, b.Encoding, 1)
+		if err != nil {
+			return err
+		}
+		font.Name = name
+		if font.Bold {
+			font.Weight = 700
+		} else {
+			font.Weight = 400
+		}
+		font.Escapement = 0
+		font.Underline = 0
+		if font.Underlined {
+			font.Underline = 1
+		}
+		font.Family = 0
+		font.CharacterSet = 1
+	} else {
+		if len(data) < 4 {
+			return nil
+		}
+		font.Height = int(binary.LittleEndian.Uint16(data[0:2]))
+		optionFlags := binary.LittleEndian.Uint16(data[2:4])
+		font.ColourIndex = 0x7FFF
+
+		font.Bold = (optionFlags & 0x0001) != 0
+		font.Italic = (optionFlags & 0x0002) != 0
+		font.Underlined = (optionFlags & 0x0004) != 0
+		font.StruckOut = (optionFlags & 0x0008) != 0
+		font.Outline = false
+		font.Shadow = false
+
+		name, err := UnpackString(data, 4, b.Encoding, 1)
+		if err != nil {
+			return err
+		}
+		font.Name = name
+		if font.Bold {
+			font.Weight = 700
+		} else {
+			font.Weight = 400
+		}
+		font.Escapement = 0
+		font.Underline = 0
+		if font.Underlined {
+			font.Underline = 1
+		}
+		font.Family = 0
+		font.CharacterSet = 1
 	}
 
 	b.FontList = append(b.FontList, font)
 	return nil
 }
 
-// handleFormat handles a FORMAT record.
-func (b *Book) handleFormat(data []byte) error {
+func (b *Book) handleEFont(data []byte) error {
+	if !b.formattingInfo {
+		return nil
+	}
 	if len(data) < 2 {
 		return nil
 	}
+	if len(b.FontList) == 0 {
+		return nil
+	}
+	b.FontList[len(b.FontList)-1].ColourIndex = int(binary.LittleEndian.Uint16(data[0:2]))
+	return nil
+}
 
-	format := &Format{}
-	pos := 0
+// handleFormat handles a FORMAT record.
+func (b *Book) handleFormat(data []byte, rectype int) error {
+	if len(data) < 2 {
+		return nil
+	}
+	if b.Encoding == "" {
+		b.Encoding = b.deriveEncoding()
+	}
+	bv := b.BiffVersion
+	if rectype == XL_FORMAT2 && bv > 30 {
+		bv = 30
+	}
 
-	// Format index (2 bytes, but we use the list position)
-	format.FormatKey = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	pos += 2
+	formatKey := 0
+	strPos := 2
+	if bv >= 50 {
+		formatKey = int(binary.LittleEndian.Uint16(data[0:2]))
+	} else {
+		formatKey = b.actualFmtCount
+		if bv <= 30 {
+			strPos = 0
+		}
+	}
+	b.actualFmtCount++
 
-	// Format string
-	if b.BiffVersion >= 80 {
-		// BIFF8: UTF-16LE encoded
-		if pos < len(data) {
-			formatString, err := UnpackUnicode(data, pos, 2)
-			if err == nil {
-				format.FormatString = formatString
-			}
+	formatString := ""
+	var err error
+	if bv >= 80 {
+		formatString, err = UnpackUnicode(data, 2, 2)
+		if err != nil {
+			return err
 		}
 	} else {
-		// Earlier versions: byte string
-		if pos < len(data) {
-			strLen := int(data[pos])
-			pos++
-			if pos+strLen <= len(data) {
-				format.FormatString = string(data[pos : pos+strLen])
+		formatString, err = UnpackString(data, strPos, b.Encoding, 1)
+		if err != nil {
+			return err
+		}
+	}
+
+	isDate := IsDateFormatString(b, formatString)
+	formatType := FGE
+	if isDate {
+		formatType = FDT
+	}
+	if !(formatKey > 163 || bv < 50) {
+		stdType, ok := stdFormatCodeTypes[formatKey]
+		if ok && b.verbosity > 0 {
+			isDateCode := stdType == FDT
+			if formatKey > 0 && formatKey < 50 && (isDateCode != isDate) {
+				fmt.Fprintf(b.logfile,
+					"WARNING *** Conflict between std format key %d and its format string %q\n",
+					formatKey, formatString)
 			}
 		}
 	}
 
-	b.FormatList = append(b.FormatList, format)
-	if b.FormatMap != nil {
-		b.FormatMap[format.FormatKey] = format
+	format := &Format{
+		FormatKey:    formatKey,
+		Type:         formatType,
+		FormatString: formatString,
 	}
+	b.FormatMap[formatKey] = format
+	b.FormatList = append(b.FormatList, format)
 	return nil
 }
 
 // handleXF handles an XF (Extended Format) record.
 func (b *Book) handleXF(data []byte) error {
-	if len(data) < 16 {
+	if len(data) < 4 {
 		return nil
 	}
 
-	xf := &XF{}
-	pos := 0
+	xf := &XF{
+		Alignment:  &XFAlignment{},
+		Border:     &XFBorder{},
+		Background: &XFBackground{},
+		Protection: &XFProtection{},
+	}
+	xf.Alignment.IndentLevel = 0
+	xf.Alignment.ShrinkToFit = false
+	xf.Alignment.TextDirection = 0
+	xf.Border.DiagUp = 0
+	xf.Border.DiagDown = 0
+	xf.Border.DiagColourIndex = 0
+	xf.Border.DiagLineStyle = 0
 
-	// Font index (2 bytes)
-	xf.FontIndex = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	pos += 2
+	bv := b.BiffVersion
+	if bv >= 50 && b.xfCount == 0 {
+		fillInStandardFormats(b)
+	}
 
-	// Format key (2 bytes)
-	xf.FormatKey = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-	pos += 2
-
-	// Protection flags and other options (2 bytes)
-	protection := binary.LittleEndian.Uint16(data[pos : pos+2])
-	pos += 2
-
-	xf.Locked = (protection & 0x0001) != 0
-	xf.Hidden = (protection & 0x0002) != 0
-
-	// Alignment options (1 byte)
-	if pos < len(data) {
-		xf.Alignment = &XFAlignment{
-			Horizontal: int(data[pos] & 0x07),
-			Vertical:   int((data[pos] & 0x70) >> 4),
+	switch {
+	case bv >= 80:
+		if len(data) < 20 {
+			return nil
 		}
-		pos++
+		xf.FontIndex = int(binary.LittleEndian.Uint16(data[0:2]))
+		xf.FormatKey = int(binary.LittleEndian.Uint16(data[2:4]))
+		pkdTypePar := binary.LittleEndian.Uint16(data[4:6])
+		pkdAlign1 := data[6]
+		xf.Alignment.Rotation = int(data[7])
+		pkdAlign2 := data[8]
+		pkdUsed := data[9]
+		pkdBrdBkg1 := binary.LittleEndian.Uint32(data[10:14])
+		pkdBrdBkg2 := binary.LittleEndian.Uint32(data[14:18])
+		pkdBrdBkg3 := binary.LittleEndian.Uint16(data[18:20])
+
+		upkbits(xf.Protection, uint32(pkdTypePar), [][3]interface{}{
+			{0, uint32(0x01), "CellLocked"},
+			{1, uint32(0x02), "FormulaHidden"},
+		})
+		upkbits(xf, uint32(pkdTypePar), [][3]interface{}{
+			{2, uint32(0x0004), "IsStyle"},
+			{3, uint32(0x0008), "Lotus123Prefix"},
+			{4, uint32(0xFFF0), "ParentStyleIndex"},
+		})
+		upkbits(xf.Alignment, uint32(pkdAlign1), [][3]interface{}{
+			{0, uint32(0x07), "HorAlign"},
+			{3, uint32(0x08), "TextWrapped"},
+			{4, uint32(0x70), "VertAlign"},
+		})
+		upkbits(xf.Alignment, uint32(pkdAlign2), [][3]interface{}{
+			{0, uint32(0x0f), "IndentLevel"},
+			{4, uint32(0x10), "ShrinkToFit"},
+			{6, uint32(0xC0), "TextDirection"},
+		})
+
+		reg := pkdUsed >> 2
+		xf.FormatFlag = int(reg & 1)
+		reg >>= 1
+		xf.FontFlag = int(reg & 1)
+		reg >>= 1
+		xf.AlignmentFlag = int(reg & 1)
+		reg >>= 1
+		xf.BorderFlag = int(reg & 1)
+		reg >>= 1
+		xf.BackgroundFlag = int(reg & 1)
+		reg >>= 1
+		xf.ProtectionFlag = int(reg & 1)
+
+		upkbitsL(xf.Border, pkdBrdBkg1, [][3]interface{}{
+			{0, uint32(0x0000000f), "LeftLineStyle"},
+			{4, uint32(0x000000f0), "RightLineStyle"},
+			{8, uint32(0x00000f00), "TopLineStyle"},
+			{12, uint32(0x0000f000), "BottomLineStyle"},
+			{16, uint32(0x007f0000), "LeftColourIndex"},
+			{23, uint32(0x3f800000), "RightColourIndex"},
+			{30, uint32(0x40000000), "DiagDown"},
+			{31, uint32(0x80000000), "DiagUp"},
+		})
+		upkbits(xf.Border, pkdBrdBkg2, [][3]interface{}{
+			{0, uint32(0x0000007F), "TopColourIndex"},
+			{7, uint32(0x00003F80), "BottomColourIndex"},
+			{14, uint32(0x001FC000), "DiagColourIndex"},
+			{21, uint32(0x01E00000), "DiagLineStyle"},
+		})
+		upkbitsL(xf.Background, pkdBrdBkg2, [][3]interface{}{
+			{26, uint32(0xFC000000), "FillPattern"},
+		})
+		upkbits(xf.Background, uint32(pkdBrdBkg3), [][3]interface{}{
+			{0, uint32(0x007F), "PatternColourIndex"},
+			{7, uint32(0x3F80), "BackgroundColourIndex"},
+		})
+	case bv >= 50:
+		if len(data) < 16 {
+			return nil
+		}
+		xf.FontIndex = int(binary.LittleEndian.Uint16(data[0:2]))
+		xf.FormatKey = int(binary.LittleEndian.Uint16(data[2:4]))
+		pkdTypePar := binary.LittleEndian.Uint16(data[4:6])
+		pkdAlign1 := data[6]
+		pkdOrientUsed := data[7]
+		pkdBrdBkg1 := binary.LittleEndian.Uint32(data[8:12])
+		pkdBrdBkg2 := binary.LittleEndian.Uint32(data[12:16])
+
+		upkbits(xf.Protection, uint32(pkdTypePar), [][3]interface{}{
+			{0, uint32(0x01), "CellLocked"},
+			{1, uint32(0x02), "FormulaHidden"},
+		})
+		upkbits(xf, uint32(pkdTypePar), [][3]interface{}{
+			{2, uint32(0x0004), "IsStyle"},
+			{3, uint32(0x0008), "Lotus123Prefix"},
+			{4, uint32(0xFFF0), "ParentStyleIndex"},
+		})
+		upkbits(xf.Alignment, uint32(pkdAlign1), [][3]interface{}{
+			{0, uint32(0x07), "HorAlign"},
+			{3, uint32(0x08), "TextWrapped"},
+			{4, uint32(0x70), "VertAlign"},
+		})
+
+		orientation := pkdOrientUsed & 0x03
+		switch orientation {
+		case 1:
+			xf.Alignment.Rotation = 255
+		case 2:
+			xf.Alignment.Rotation = 90
+		case 3:
+			xf.Alignment.Rotation = 180
+		default:
+			xf.Alignment.Rotation = 0
+		}
+
+		reg := pkdOrientUsed >> 2
+		xf.FormatFlag = int(reg & 1)
+		reg >>= 1
+		xf.FontFlag = int(reg & 1)
+		reg >>= 1
+		xf.AlignmentFlag = int(reg & 1)
+		reg >>= 1
+		xf.BorderFlag = int(reg & 1)
+		reg >>= 1
+		xf.BackgroundFlag = int(reg & 1)
+		reg >>= 1
+		xf.ProtectionFlag = int(reg & 1)
+
+		upkbitsL(xf.Background, pkdBrdBkg1, [][3]interface{}{
+			{0, uint32(0x0000007F), "PatternColourIndex"},
+			{7, uint32(0x00003F80), "BackgroundColourIndex"},
+			{16, uint32(0x003F0000), "FillPattern"},
+		})
+		upkbitsL(xf.Border, pkdBrdBkg1, [][3]interface{}{
+			{22, uint32(0x01C00000), "BottomLineStyle"},
+			{25, uint32(0xFE000000), "BottomColourIndex"},
+		})
+		upkbits(xf.Border, pkdBrdBkg2, [][3]interface{}{
+			{0, uint32(0x00000007), "TopLineStyle"},
+			{3, uint32(0x00000038), "LeftLineStyle"},
+			{6, uint32(0x000001C0), "RightLineStyle"},
+			{9, uint32(0x0000FE00), "TopColourIndex"},
+			{16, uint32(0x007F0000), "LeftColourIndex"},
+			{23, uint32(0x3F800000), "RightColourIndex"},
+		})
+	case bv >= 40:
+		if len(data) < 12 {
+			return nil
+		}
+		xf.FontIndex = int(data[0])
+		xf.FormatKey = int(data[1])
+		pkdTypePar := binary.LittleEndian.Uint16(data[2:4])
+		pkdAlignOrient := data[4]
+		pkdUsed := data[5]
+		pkdBkg34 := binary.LittleEndian.Uint16(data[6:8])
+		pkdBrd34 := binary.LittleEndian.Uint32(data[8:12])
+
+		upkbits(xf.Protection, uint32(pkdTypePar), [][3]interface{}{
+			{0, uint32(0x01), "CellLocked"},
+			{1, uint32(0x02), "FormulaHidden"},
+		})
+		upkbits(xf, uint32(pkdTypePar), [][3]interface{}{
+			{2, uint32(0x0004), "IsStyle"},
+			{3, uint32(0x0008), "Lotus123Prefix"},
+			{4, uint32(0xFFF0), "ParentStyleIndex"},
+		})
+		upkbits(xf.Alignment, uint32(pkdAlignOrient), [][3]interface{}{
+			{0, uint32(0x07), "HorAlign"},
+			{3, uint32(0x08), "TextWrapped"},
+			{4, uint32(0x30), "VertAlign"},
+		})
+		orientation := (pkdAlignOrient & 0xC0) >> 6
+		switch orientation {
+		case 1:
+			xf.Alignment.Rotation = 255
+		case 2:
+			xf.Alignment.Rotation = 90
+		case 3:
+			xf.Alignment.Rotation = 180
+		default:
+			xf.Alignment.Rotation = 0
+		}
+
+		reg := pkdUsed >> 2
+		xf.FormatFlag = int(reg & 1)
+		reg >>= 1
+		xf.FontFlag = int(reg & 1)
+		reg >>= 1
+		xf.AlignmentFlag = int(reg & 1)
+		reg >>= 1
+		xf.BorderFlag = int(reg & 1)
+		reg >>= 1
+		xf.BackgroundFlag = int(reg & 1)
+		reg >>= 1
+		xf.ProtectionFlag = int(reg & 1)
+
+		upkbits(xf.Background, uint32(pkdBkg34), [][3]interface{}{
+			{0, uint32(0x003F), "FillPattern"},
+			{6, uint32(0x07C0), "PatternColourIndex"},
+			{11, uint32(0xF800), "BackgroundColourIndex"},
+		})
+		upkbitsL(xf.Border, pkdBrd34, [][3]interface{}{
+			{0, uint32(0x00000007), "TopLineStyle"},
+			{3, uint32(0x000000F8), "TopColourIndex"},
+			{8, uint32(0x00000700), "LeftLineStyle"},
+			{11, uint32(0x0000F800), "LeftColourIndex"},
+			{16, uint32(0x00070000), "BottomLineStyle"},
+			{19, uint32(0x00F80000), "BottomColourIndex"},
+			{24, uint32(0x07000000), "RightLineStyle"},
+			{27, uint32(0xF8000000), "RightColourIndex"},
+		})
+	case bv == 30:
+		if len(data) < 12 {
+			return nil
+		}
+		xf.FontIndex = int(data[0])
+		xf.FormatKey = int(data[1])
+		pkdTypeProt := data[2]
+		pkdUsed := data[3]
+		pkdAlignPar := binary.LittleEndian.Uint16(data[4:6])
+		pkdBkg34 := binary.LittleEndian.Uint16(data[6:8])
+		pkdBrd34 := binary.LittleEndian.Uint32(data[8:12])
+
+		upkbits(xf.Protection, uint32(pkdTypeProt), [][3]interface{}{
+			{0, uint32(0x01), "CellLocked"},
+			{1, uint32(0x02), "FormulaHidden"},
+		})
+		upkbits(xf, uint32(pkdTypeProt), [][3]interface{}{
+			{2, uint32(0x0004), "IsStyle"},
+			{3, uint32(0x0008), "Lotus123Prefix"},
+		})
+		upkbits(xf.Alignment, uint32(pkdAlignPar), [][3]interface{}{
+			{0, uint32(0x07), "HorAlign"},
+			{3, uint32(0x08), "TextWrapped"},
+		})
+		upkbits(xf, uint32(pkdAlignPar), [][3]interface{}{
+			{4, uint32(0xFFF0), "ParentStyleIndex"},
+		})
+
+		reg := pkdUsed >> 2
+		xf.FormatFlag = int(reg & 1)
+		reg >>= 1
+		xf.FontFlag = int(reg & 1)
+		reg >>= 1
+		xf.AlignmentFlag = int(reg & 1)
+		reg >>= 1
+		xf.BorderFlag = int(reg & 1)
+		reg >>= 1
+		xf.BackgroundFlag = int(reg & 1)
+		reg >>= 1
+		xf.ProtectionFlag = int(reg & 1)
+
+		upkbits(xf.Background, uint32(pkdBkg34), [][3]interface{}{
+			{0, uint32(0x003F), "FillPattern"},
+			{6, uint32(0x07C0), "PatternColourIndex"},
+			{11, uint32(0xF800), "BackgroundColourIndex"},
+		})
+		upkbitsL(xf.Border, pkdBrd34, [][3]interface{}{
+			{0, uint32(0x00000007), "TopLineStyle"},
+			{3, uint32(0x000000F8), "TopColourIndex"},
+			{8, uint32(0x00000700), "LeftLineStyle"},
+			{11, uint32(0x0000F800), "LeftColourIndex"},
+			{16, uint32(0x00070000), "BottomLineStyle"},
+			{19, uint32(0x00F80000), "BottomColourIndex"},
+			{24, uint32(0x07000000), "RightLineStyle"},
+			{27, uint32(0xF8000000), "RightColourIndex"},
+		})
+		xf.Alignment.VertAlign = 2
+		xf.Alignment.Rotation = 0
+	case bv == 21:
+		if len(data) < 4 {
+			return nil
+		}
+		xf.FontIndex = int(data[0])
+		formatEtc := data[2]
+		halignEtc := data[3]
+		xf.FormatKey = int(formatEtc & 0x3F)
+		upkbits(xf.Protection, uint32(formatEtc), [][3]interface{}{
+			{6, uint32(0x40), "CellLocked"},
+			{7, uint32(0x80), "FormulaHidden"},
+		})
+		upkbits(xf.Alignment, uint32(halignEtc), [][3]interface{}{
+			{0, uint32(0x07), "HorAlign"},
+		})
+		for _, side := range []struct {
+			mask uint8
+			name string
+		}{
+			{0x08, "Left"},
+			{0x10, "Right"},
+			{0x20, "Top"},
+			{0x40, "Bottom"},
+		} {
+			if halignEtc&side.mask != 0 {
+				switch side.name {
+				case "Left":
+					xf.Border.LeftColourIndex = 8
+					xf.Border.LeftLineStyle = 1
+				case "Right":
+					xf.Border.RightColourIndex = 8
+					xf.Border.RightLineStyle = 1
+				case "Top":
+					xf.Border.TopColourIndex = 8
+					xf.Border.TopLineStyle = 1
+				case "Bottom":
+					xf.Border.BottomColourIndex = 8
+					xf.Border.BottomLineStyle = 1
+				}
+			} else {
+				switch side.name {
+				case "Left":
+					xf.Border.LeftColourIndex = 0
+					xf.Border.LeftLineStyle = 0
+				case "Right":
+					xf.Border.RightColourIndex = 0
+					xf.Border.RightLineStyle = 0
+				case "Top":
+					xf.Border.TopColourIndex = 0
+					xf.Border.TopLineStyle = 0
+				case "Bottom":
+					xf.Border.BottomColourIndex = 0
+					xf.Border.BottomLineStyle = 0
+				}
+			}
+		}
+		if halignEtc&0x80 != 0 {
+			xf.Background.FillPattern = 17
+		} else {
+			xf.Background.FillPattern = 0
+		}
+		xf.Background.BackgroundColourIndex = 9
+		xf.Background.PatternColourIndex = 8
+		xf.ParentStyleIndex = 0
+		xf.Alignment.VertAlign = 2
+		xf.Alignment.Rotation = 0
+		xf.FormatFlag = 1
+		xf.FontFlag = 1
+		xf.AlignmentFlag = 1
+		xf.BorderFlag = 1
+		xf.BackgroundFlag = 1
+		xf.ProtectionFlag = 1
+	default:
+		return NewXLRDError("unknown BIFF version %d in XF record", bv)
 	}
 
-	// Fill/rotation options (1 byte)
-	if pos < len(data) {
-		pos++ // Skip for now
-	}
+	xf.Alignment.Horizontal = xf.Alignment.HorAlign
+	xf.Alignment.Vertical = xf.Alignment.VertAlign
+	xf.Alignment.WrapText = xf.Alignment.TextWrapped
 
-	// Border options (4 bytes)
-	if pos+4 <= len(data) {
-		xf.Border = &XFBorder{}
-		pos += 4
-	}
+	xf.Border.Left = xf.Border.LeftLineStyle
+	xf.Border.Right = xf.Border.RightLineStyle
+	xf.Border.Top = xf.Border.TopLineStyle
+	xf.Border.Bottom = xf.Border.BottomLineStyle
 
-	// Background options (2 bytes)
-	if pos+2 <= len(data) {
-		xf.Background = &XFBackground{}
-		pos += 2
-	}
+	xf.Locked = xf.Protection.CellLocked
+	xf.Hidden = xf.Protection.FormulaHidden
 
+	xf.XFIndex = len(b.XFList)
 	b.XFList = append(b.XFList, xf)
+	b.xfCount++
+
+	if b.verbosity >= 3 {
+		xf.Dump(b.logfile, fmt.Sprintf("--- handle_xf: xf[%d] ---", xf.XFIndex), " ", 0)
+	}
+
+	cellType := XL_CELL_NUMBER
+	if fmtObj, ok := b.FormatMap[xf.FormatKey]; ok {
+		if ty, ok := cellTypeFromFormatType[fmtObj.Type]; ok {
+			cellType = ty
+		}
+	}
+	b.xfIndexToXLTypeMap[xf.XFIndex] = cellType
+
+	if b.formattingInfo {
+		if b.verbosity > 0 && xf.IsStyle != 0 && xf.ParentStyleIndex != 0x0FFF {
+			fmt.Fprintf(b.logfile,
+				"WARNING *** XF[%d] is a style XF but parent_style_index is 0x%04x, not 0x0fff\n",
+				xf.XFIndex, xf.ParentStyleIndex)
+		}
+		checkColourIndexesInObj(b, xf, xf.XFIndex)
+	}
+	if _, ok := b.FormatMap[xf.FormatKey]; !ok {
+		if b.verbosity > 0 {
+			fmt.Fprintf(b.logfile,
+				"WARNING *** XF[%d] unknown (raw) format key (%d, 0x%04x)\n",
+				xf.XFIndex, xf.FormatKey, xf.FormatKey)
+		}
+		xf.FormatKey = 0
+	}
 	return nil
 }
 
 // handleStyle handles a STYLE record.
 func (b *Book) handleStyle(data []byte) error {
-	if len(data) < 2 {
+	if !b.formattingInfo {
 		return nil
 	}
+	if len(data) < 4 {
+		return nil
+	}
+	if b.Encoding == "" {
+		b.Encoding = b.deriveEncoding()
+	}
 
-	// For now, we just skip style records
-	// Style information is complex and not always needed
+	bv := b.BiffVersion
+	flagAndXfx := binary.LittleEndian.Uint16(data[0:2])
+	builtInID := int(data[2])
+	level := int(data[3])
+	xfIndex := int(flagAndXfx & 0x0fff)
+
+	builtIn := 0
+	name := ""
+	if len(data) >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 0 {
+		if _, ok := b.StyleNameMap["Normal"]; !ok {
+			builtIn = 1
+			builtInID = 0
+			xfIndex = 0
+			name = "Normal"
+			level = 255
+		}
+	} else if flagAndXfx&0x8000 != 0 {
+		builtIn = 1
+		if builtInID >= 0 && builtInID < len(builtInStyleNames) {
+			name = builtInStyleNames[builtInID]
+		}
+		if builtInID == 1 || builtInID == 2 {
+			name = fmt.Sprintf("%s%d", name, level+1)
+		}
+	} else {
+		builtIn = 0
+		builtInID = 0
+		level = 0
+		var err error
+		if bv >= 80 {
+			name, err = UnpackUnicode(data, 2, 2)
+		} else {
+			name, err = UnpackString(data, 2, b.Encoding, 1)
+		}
+		if err != nil {
+			return err
+		}
+		if b.verbosity >= 2 && name == "" {
+			fmt.Fprintln(b.logfile, "WARNING *** A user-defined style has a zero-length name")
+		}
+	}
+
+	b.StyleNameMap[name] = [2]int{builtIn, xfIndex}
+	if b.verbosity >= 2 {
+		fmt.Fprintf(b.logfile,
+			"STYLE: built_in=%d xf_index=%d built_in_id=%d level=%d name=%q\n",
+			builtIn, xfIndex, builtInID, level, name)
+	}
 	return nil
 }
 
 // handlePalette handles a PALETTE record.
 func (b *Book) handlePalette(data []byte) error {
+	if !b.formattingInfo {
+		return nil
+	}
 	if len(data) < 2 {
 		return nil
 	}
@@ -1075,6 +1612,25 @@ func (b *Book) handlePalette(data []byte) error {
 	// Number of colors (2 bytes)
 	numColors := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 	pos += 2
+	expectedSize := 4*numColors + 2
+	if len(data) < expectedSize || len(data) > expectedSize+4 {
+		return NewXLRDError("PALETTE record: expected size %d, actual size %d", expectedSize, len(data))
+	}
+
+	expectedColors := 16
+	if b.BiffVersion >= 50 {
+		expectedColors = 56
+	}
+	if b.verbosity >= 1 && numColors != expectedColors {
+		fmt.Fprintf(b.logfile,
+			"NOTE *** Expected %d colours in PALETTE record, found %d\n",
+			expectedColors, numColors)
+	} else if b.verbosity >= 2 {
+		fmt.Fprintf(b.logfile, "PALETTE record with %d colours\n", numColors)
+	}
+	if len(b.PaletteRecord) != 0 {
+		return NewXLRDError("PALETTE record: multiple palette records found")
+	}
 
 	b.PaletteRecord = make([][3]int, 0, numColors)
 
@@ -1083,7 +1639,15 @@ func (b *Book) handlePalette(data []byte) error {
 		r := int(data[pos])
 		g := int(data[pos+1])
 		b_val := int(data[pos+2])
+		oldRGB := b.ColourMap[8+i]
 		b.PaletteRecord = append(b.PaletteRecord, [3]int{r, g, b_val})
+		b.ColourMap[8+i] = [3]int{r, g, b_val}
+		if b.verbosity >= 2 {
+			newRGB := [3]int{r, g, b_val}
+			if newRGB != oldRGB {
+				fmt.Fprintf(b.logfile, "%2d: %v -> %v\n", i, oldRGB, newRGB)
+			}
+		}
 		pos += 4
 	}
 
@@ -1435,8 +1999,13 @@ func (b *Book) initializeFormatInfo() {
 	b.XFList = make([]*XF, 0)
 	b.FontList = make([]*Font, 0)
 	b.StyleNameMap = make(map[string][2]int)
-	b.ColourMap = make(map[int][3]int)
 	b.PaletteRecord = make([][3]int, 0)
+	b.ColourIndexesUsed = make(map[int]bool)
+	b.actualFmtCount = 0
+	b.xfCount = 0
+	b.xfEpilogueDone = false
+	b.xfIndexToXLTypeMap = map[int]int{0: XL_CELL_NUMBER}
+	initialiseColourMap(b)
 }
 
 // fakeGlobalsGetSheet handles BIFF 4.0 and earlier (no workbook globals).
@@ -1694,15 +2263,134 @@ func (b *Book) namesEpilogue() {
 
 // xfEpilogue processes extended format information after all XF records are read.
 func (b *Book) xfEpilogue() {
-	// XF epilogue processing - currently minimal implementation
-	// In full implementation, this would handle XF record post-processing
+	b.xfEpilogueDone = true
+	numXfs := len(b.XFList)
+	if b.verbosity >= 3 {
+		fmt.Fprintln(b.logfile, "xf_epilogue called ...")
+	}
+
+	checkSame := func(xf *XF, parent *XF, attr string) {
+		if !reflect.DeepEqual(reflect.ValueOf(xf).Elem().FieldByName(attr).Interface(),
+			reflect.ValueOf(parent).Elem().FieldByName(attr).Interface()) {
+			fmt.Fprintf(b.logfile,
+				"NOTE !!! XF[%d] parent[%d] %s different\n",
+				xf.XFIndex, parent.XFIndex, attr)
+		}
+	}
+
+	for xfx := 0; xfx < numXfs; xfx++ {
+		xf := b.XFList[xfx]
+		cellType := XL_CELL_TEXT
+		if fmtObj, ok := b.FormatMap[xf.FormatKey]; ok {
+			if ty, ok := cellTypeFromFormatType[fmtObj.Type]; ok {
+				cellType = ty
+			}
+		}
+		b.xfIndexToXLTypeMap[xf.XFIndex] = cellType
+
+		if !b.formattingInfo {
+			continue
+		}
+		if xf.IsStyle != 0 {
+			continue
+		}
+		if xf.ParentStyleIndex < 0 || xf.ParentStyleIndex >= numXfs {
+			if b.verbosity >= 1 {
+				fmt.Fprintf(b.logfile,
+					"WARNING *** XF[%d]: is_style=%d but parent_style_index=%d\n",
+					xf.XFIndex, xf.IsStyle, xf.ParentStyleIndex)
+			}
+			xf.ParentStyleIndex = 0
+		}
+		if b.BiffVersion >= 30 {
+			if b.verbosity >= 1 {
+				if xf.ParentStyleIndex == xf.XFIndex {
+					fmt.Fprintf(b.logfile,
+						"NOTE !!! XF[%d]: parent_style_index is also %d\n",
+						xf.XFIndex, xf.ParentStyleIndex)
+				} else if b.XFList[xf.ParentStyleIndex].IsStyle == 0 {
+					fmt.Fprintf(b.logfile,
+						"NOTE !!! XF[%d]: parent_style_index is %d; style flag not set\n",
+						xf.XFIndex, xf.ParentStyleIndex)
+				}
+				if xf.ParentStyleIndex > xf.XFIndex {
+					fmt.Fprintf(b.logfile,
+						"NOTE !!! XF[%d]: parent_style_index is %d; out of order?\n",
+						xf.XFIndex, xf.ParentStyleIndex)
+				}
+			}
+			parent := b.XFList[xf.ParentStyleIndex]
+			if xf.AlignmentFlag == 0 && parent.AlignmentFlag == 0 {
+				if b.verbosity >= 1 {
+					checkSame(xf, parent, "Alignment")
+				}
+			}
+			if xf.BackgroundFlag == 0 && parent.BackgroundFlag == 0 {
+				if b.verbosity >= 1 {
+					checkSame(xf, parent, "Background")
+				}
+			}
+			if xf.BorderFlag == 0 && parent.BorderFlag == 0 {
+				if b.verbosity >= 1 {
+					checkSame(xf, parent, "Border")
+				}
+			}
+			if xf.ProtectionFlag == 0 && parent.ProtectionFlag == 0 {
+				if b.verbosity >= 1 {
+					checkSame(xf, parent, "Protection")
+				}
+			}
+			if xf.FormatFlag == 0 && parent.FormatFlag == 0 && b.verbosity >= 1 {
+				if xf.FormatKey != parent.FormatKey {
+					fmt.Fprintf(b.logfile,
+						"NOTE !!! XF[%d] fmtk=%d, parent[%d] fmtk=%d\n",
+						xf.XFIndex, xf.FormatKey, parent.XFIndex, parent.FormatKey)
+				}
+			}
+			if xf.FontFlag == 0 && parent.FontFlag == 0 && b.verbosity >= 1 {
+				if xf.FontIndex != parent.FontIndex {
+					fmt.Fprintf(b.logfile,
+						"NOTE !!! XF[%d] fontx=%d, parent[%d] fontx=%d\n",
+						xf.XFIndex, xf.FontIndex, parent.XFIndex, parent.FontIndex)
+				}
+			}
+		}
+	}
 	b.xfEpilogueDone = true
 }
 
 // paletteEpilogue processes palette information after all records are read.
 func (b *Book) paletteEpilogue() {
-	// Palette epilogue processing - currently minimal implementation
-	// In full implementation, this would finalize palette mappings
+	if !b.formattingInfo {
+		return
+	}
+	for _, font := range b.FontList {
+		if font.FontIndex == 4 {
+			continue
+		}
+		cx := font.ColourIndex
+		if cx == 0x7FFF {
+			continue
+		}
+		if _, ok := b.ColourMap[cx]; ok {
+			b.ColourIndexesUsed[cx] = true
+			continue
+		}
+		if b.verbosity > 0 {
+			fmt.Fprintf(b.logfile, "Size of colour table: %d\n", len(b.ColourMap))
+			fmt.Fprintf(b.logfile,
+				"*** Font #%d (%q): colour index 0x%04x is unknown\n",
+				font.FontIndex, font.Name, cx)
+		}
+	}
+	if b.verbosity >= 1 {
+		used := make([]int, 0, len(b.ColourIndexesUsed))
+		for k := range b.ColourIndexesUsed {
+			used = append(used, k)
+		}
+		sort.Ints(used)
+		fmt.Fprintf(b.logfile, "\nColour indexes used:\n%v\n", used)
+	}
 }
 
 // getRecordParts reads the next BIFF record from the current position.

@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-
 // assert checks a condition and panics if false
 func assert(condition bool) {
 	if !condition {
@@ -631,7 +630,6 @@ func oprPow(a, b interface{}) interface{} {
 
 // ===== TOP LEVEL FUNCTIONS =====
 
-
 // adjustCellAddrBiff8 function
 
 // adjustCellAddrBiffLe7 function
@@ -711,6 +709,40 @@ func Cellnameabs(rowx int, colx int, r1c1 int) string {
 		return fmt.Sprintf("R%dC%d", rowx+1, colx+1)
 	}
 	return fmt.Sprintf("$%s$%d", colname(colx), rowx+1)
+}
+
+// DisplayCellAddress returns a human-readable cell address with relative/absolute flags.
+func DisplayCellAddress(rowx, colx, relrow, relcol int) string {
+	rowpart := ""
+	if relrow != 0 {
+		sign := "+"
+		if rowx < 0 {
+			sign = "-"
+		}
+		rowpart = fmt.Sprintf("(*%s%d)", sign, absInt(rowx))
+	} else {
+		rowpart = fmt.Sprintf("$%d", rowx+1)
+	}
+
+	colpart := ""
+	if relcol != 0 {
+		sign := "+"
+		if colx < 0 {
+			sign = "-"
+		}
+		colpart = fmt.Sprintf("(*%s%d)", sign, absInt(colx))
+	} else {
+		colpart = "$" + colname(colx)
+	}
+
+	return colpart + rowpart
+}
+
+func absInt(val int) int {
+	if val < 0 {
+		return -val
+	}
+	return val
 }
 
 // cellnamerel function

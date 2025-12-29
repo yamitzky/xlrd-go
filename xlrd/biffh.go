@@ -523,8 +523,9 @@ func fprintf(w io.Writer, format string, args ...interface{}) {
 // manifest is a slice of [shift, mask, fieldName] tuples.
 // This function uses reflection to set fields on the target object.
 func upkbits(tgt_obj interface{}, src uint32, manifest [][3]interface{}) {
-	// This is a simplified version. In practice, you'd use reflection to set struct fields.
-	// For now, we'll implement a basic version that works with maps.
+	if tgt_obj == nil {
+		return
+	}
 	if tgt_map, ok := tgt_obj.(map[string]interface{}); ok {
 		for _, item := range manifest {
 			n := item[0].(int)
@@ -532,17 +533,59 @@ func upkbits(tgt_obj interface{}, src uint32, manifest [][3]interface{}) {
 			attr := item[2].(string)
 			tgt_map[attr] = (src & mask) >> uint32(n)
 		}
+		return
 	}
+	setBitsOnStruct(tgt_obj, src, manifest, false)
 }
 
 // upkbitsL is like upkbits but ensures the result is an int.
 func upkbitsL(tgt_obj interface{}, src uint32, manifest [][3]interface{}) {
+	if tgt_obj == nil {
+		return
+	}
 	if tgt_map, ok := tgt_obj.(map[string]interface{}); ok {
 		for _, item := range manifest {
 			n := item[0].(int)
 			mask := item[1].(uint32)
 			attr := item[2].(string)
 			tgt_map[attr] = int((src & mask) >> uint32(n))
+		}
+		return
+	}
+	setBitsOnStruct(tgt_obj, src, manifest, true)
+}
+
+func setBitsOnStruct(tgtObj interface{}, src uint32, manifest [][3]interface{}, forceInt bool) {
+	v := reflect.ValueOf(tgtObj)
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
+	for _, item := range manifest {
+		shift := item[0].(int)
+		mask := item[1].(uint32)
+		attr := item[2].(string)
+		val := (src & mask) >> uint32(shift)
+		field := v.FieldByName(attr)
+		if !field.IsValid() || !field.CanSet() {
+			continue
+		}
+		switch field.Kind() {
+		case reflect.Bool:
+			field.SetBool(val != 0)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			field.SetInt(int64(val))
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			if forceInt {
+				field.SetUint(uint64(val))
+			} else {
+				field.SetUint(uint64(val))
+			}
 		}
 	}
 }
