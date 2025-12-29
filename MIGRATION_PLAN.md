@@ -16,7 +16,7 @@ This document outlines the plan to migrate the xlrd Python library to pure Go, m
 - All code must compile
 - Migrate all test cases
 - Migrate all documentation
-- Update README with Go usage examples
+- Update README with Go usage examples (Markdown)
 - Code comments and documentation in English
 - Commits in English
 
@@ -33,7 +33,7 @@ This document outlines the plan to migrate the xlrd Python library to pure Go, m
 xlrd-go/
 ├── go.mod
 ├── go.sum
-├── README.md (updated)
+├── README.md (updated, Markdown)
 ├── LICENSE
 ├── cmd/
 │   └── xlrd/          # CLI tool (equivalent to scripts/runxlrd.py)
