@@ -272,11 +272,9 @@ func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) 
 		return nil, err
 	}
 
-	if fileFormat == "" {
-		return nil, NewXLRDError("Unsupported format, or corrupt file")
-	}
-
-	if fileFormat != "xls" {
+	// Allow unknown formats to pass through, as some ancient files that xlrd can parse
+	// don't start with the expected signature (e.g., raw BIFF files)
+	if fileFormat != "" && fileFormat != "xls" {
 		return nil, NewXLRDError("%s; not supported", FileFormatDescriptions[fileFormat])
 	}
 
@@ -390,14 +388,16 @@ func (b *Book) parseGlobals(options *OpenWorkbookOptions) error {
 	if biffVersion <= 40 {
 		// BIFF 4.0 and earlier - no workbook globals, only 1 worksheet
 		if options.OnDemand {
-			// TODO: log warning
+			fmt.Fprintf(b.logfile, "*** WARNING: on_demand is not supported for this Excel version.\n*** Setting on_demand to False.\n")
+			options.OnDemand = false
 		}
 		b.fakeGlobalsGetSheet()
 	} else if biffVersion == 45 {
 		// BIFF 4W - worksheet(s) embedded in global stream
 		b.parseGlobalsRecords(options)
 		if options.OnDemand {
-			// TODO: log warning
+			fmt.Fprintf(b.logfile, "*** WARNING: on_demand is not supported for this Excel version.\n*** Setting on_demand to False.\n")
+			options.OnDemand = false
 		}
 	} else {
 		// BIFF 5 and later
@@ -405,7 +405,10 @@ func (b *Book) parseGlobals(options *OpenWorkbookOptions) error {
 		b.sheetList = make([]*Sheet, len(b.sheetNames))
 		if !options.OnDemand {
 			// Load all sheets
-			// TODO: implement getSheets()
+			err = b.getSheets()
+			if err != nil {
+				return err
+			}
 		}
 	}
 	
@@ -467,10 +470,6 @@ func (b *Book) getBOF(rqdStream int) (int, error) {
 	version2 := binary.LittleEndian.Uint16(data[0:2])
 	streamtype := binary.LittleEndian.Uint16(data[2:4])
 
-	if streamtype != uint16(rqdStream) {
-		return 0, NewXLRDError("BOF record stream type mismatch: expected 0x%04x, got 0x%04x", rqdStream, streamtype)
-	}
-	
 	var version int
 	if version1 == 0x08 {
 		build := binary.LittleEndian.Uint16(data[4:6])
@@ -504,8 +503,19 @@ func (b *Book) getBOF(rqdStream int) (int, error) {
 	} else {
 		return 0, NewXLRDError("Unknown BIFF version: 0x%02x", version1)
 	}
-	
-	return version, nil
+
+	// Check stream type (Python xlrd logic)
+	gotGlobals := streamtype == XL_WORKBOOK_GLOBALS || (version == 45 && streamtype == XL_WORKBOOK_GLOBALS_4W)
+	if (rqdStream == XL_WORKBOOK_GLOBALS && gotGlobals) || streamtype == uint16(rqdStream) {
+		return version, nil
+	}
+	if version < 50 && streamtype == XL_WORKSHEET {
+		return version, nil
+	}
+	if version >= 50 && streamtype == 0x0100 {
+		return 0, NewXLRDError("Workspace file -- no spreadsheet data")
+	}
+	return 0, NewXLRDError("BOF not workbook/worksheet: op=0x%04x vers=0x%04x strm=0x%04x -> BIFF%d", opcode, version2, streamtype, version)
 }
 
 // parseGlobalsRecords parses the workbook globals records.
@@ -1114,6 +1124,18 @@ func (b *Book) getSheet(shNumber int) (*Sheet, error) {
 	}
 	
 	return sheet, nil
+}
+
+// getSheets loads all sheets in the workbook.
+func (b *Book) getSheets() error {
+	for sheetNo := 0; sheetNo < len(b.sheetNames); sheetNo++ {
+		sheet, err := b.getSheet(sheetNo)
+		if err != nil {
+			return err
+		}
+		b.sheetList[sheetNo] = sheet
+	}
+	return nil
 }
 
 // getRecordParts reads the next BIFF record from the current position.

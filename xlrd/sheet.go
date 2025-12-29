@@ -52,6 +52,10 @@ type Sheet struct {
 	cellValues   [][]interface{}
 	cellTypes    [][]int
 	cellXFIndexes [][]int
+
+	// Cached magnification factors from WINDOW2 record
+	CachedPageBreakPreviewMagFactor int // default 0 (60%), from WINDOW2 record
+	CachedNormalViewMagFactor       int // default 0 (100%), from WINDOW2 record
 }
 
 // Cell represents a cell in a worksheet.
