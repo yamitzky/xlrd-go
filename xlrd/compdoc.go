@@ -224,13 +224,17 @@ func (cd *CompDoc) getStream(mem []byte, base int, sat []int, secSize int, start
 		}
 
 		// Check for corruption: if this sector has already been seen
-		if s < len(cd.seen) && cd.seen[s] != 0 {
+		// Skip corruption check for short streams (seenID == 0, equivalent to None in Python)
+		if seenID != 0 && s < len(cd.seen) && cd.seen[s] != 0 {
 			if !cd.IgnoreWorkbookCorruption {
 				fmt.Fprintf(cd.Logfile, "_get_stream(%s): seen corruption at sector %d (value %d)\n", name, s, cd.seen[s])
 				return nil // Would return CompDocError in full implementation
+			} else {
+				// Ignore corruption and continue
+				fmt.Fprintf(cd.Logfile, "_get_stream(%s): ignoring corruption at sector %d (value %d)\n", name, s, cd.seen[s])
 			}
 		}
-		if s < len(cd.seen) {
+		if seenID != 0 && s < len(cd.seen) {
 			cd.seen[s] = seenID
 		}
 
@@ -316,11 +320,42 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 	for i := 0; i < 109; i++ {
 		MSAT[i] = int(int32(binary.LittleEndian.Uint32(mem[76+i*4 : 80+i*4])))
 	}
-	
+
+	// Handle MSAT extensions if present
+	MSATXFirstSecSID := int(int32(binary.LittleEndian.Uint32(mem[68:72])))
+	MSATXTotSecs := int(binary.LittleEndian.Uint32(mem[72:76]))
+
+	if MSATXTotSecs > 0 && MSATXFirstSecSID >= 0 && MSATXFirstSecSID < memDataSecs {
+		sid := MSATXFirstSecSID
+		for i := 0; i < MSATXTotSecs && sid >= 0 && sid < memDataSecs; i++ {
+			if sid < len(cd.seen) && cd.seen[sid] != 0 {
+				// Corruption detected
+				break
+			}
+			if sid < len(cd.seen) {
+				cd.seen[sid] = 1
+			}
+
+			offset := 512 + sid*cd.secSize
+			if offset+cd.secSize > len(mem) {
+				break
+			}
+
+			// Read MSAT extension sector
+			extMSAT := make([]int, cd.secSize/4)
+			for j := 0; j < len(extMSAT); j++ {
+				extMSAT[j] = int(int32(binary.LittleEndian.Uint32(mem[offset+j*4 : offset+(j+1)*4])))
+			}
+
+			MSAT = append(MSAT, extMSAT[:len(extMSAT)-1]...) // Last entry is next sector pointer
+			sid = extMSAT[len(extMSAT)-1] // Next sector in chain
+		}
+	}
+
 	// Build SAT (Sector Allocation Table)
 	cd.SAT = make([]int, 0)
 	nent := cd.secSize / 4 // number of SID entries in a sector
-	
+
 	for _, msid := range MSAT {
 		if msid == FREESID || msid == EOCSID {
 			continue

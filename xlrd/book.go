@@ -268,6 +268,9 @@ func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) 
 			Logfile: os.Stdout,
 		}
 	}
+	if options.Logfile == nil {
+		options.Logfile = os.Stdout
+	}
 
 	fileFormat, err := InspectFormat(filename, nil)
 	if err != nil {
@@ -289,11 +292,14 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 		sheetList:  []*Sheet{},
 		sheetNames: []string{},
 	}
-	
+
 	if options == nil {
 		options = &OpenWorkbookOptions{
 			Logfile: os.Stdout,
 		}
+	}
+	if options.Logfile == nil {
+		options.Logfile = os.Stdout
 	}
 	
 	bk.logfile = options.Logfile
