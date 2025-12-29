@@ -114,7 +114,7 @@ func TestPercentCells(t *testing.T) {
 		t.Fatalf("Failed to get sheet: %v", err)
 	}
 	testCases := []struct {
-		row  int
+		row   int
 		value float64
 	}{
 		{6, 0.974},
@@ -148,7 +148,7 @@ func TestCurrencyCells(t *testing.T) {
 		t.Fatalf("Failed to get sheet: %v", err)
 	}
 	testCases := []struct {
-		row  int
+		row   int
 		value float64
 	}{
 		{8, 1000.30},

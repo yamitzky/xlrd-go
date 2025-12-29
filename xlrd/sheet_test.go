@@ -221,7 +221,18 @@ func TestSheetCellXFIndexError(t *testing.T) {
 
 // Col method is not in Go version - use ColSlice instead
 func TestSheetCol(t *testing.T) {
-	t.Skip("Col method not implemented in Go version")
+	book, err := OpenWorkbook(fromSample("profiles.xls"), &OpenWorkbookOptions{FormattingInfo: true})
+	if err != nil {
+		t.Fatalf("Failed to open workbook: %v", err)
+	}
+	sheet, err := book.SheetByIndex(sheetIndex)
+	if err != nil {
+		t.Fatalf("Failed to get sheet: %v", err)
+	}
+	col := sheet.Col(0)
+	if len(col) != nRows {
+		t.Errorf("Expected col length %d, got %d", nRows, len(col))
+	}
 }
 
 func TestSheetRow(t *testing.T) {

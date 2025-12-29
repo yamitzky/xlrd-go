@@ -298,6 +298,11 @@ func (s *Sheet) ColSlice(colx, startRowx int, endRowx *int) []*Cell {
 	return cells
 }
 
+// Col is an alias for ColSlice with default parameters (startRowx=0, endRowx=nil).
+func (s *Sheet) Col(colx int) []*Cell {
+	return s.ColSlice(colx, 0, nil)
+}
+
 // ColValues returns a slice of the values of the cells in the given column.
 func (s *Sheet) ColValues(colx, startRowx int, endRowx *int) []interface{} {
 	if colx < 0 || colx >= s.NCols {
