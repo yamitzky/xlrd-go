@@ -196,14 +196,20 @@ func (cd *CompDoc) locateStream(mem []byte, base int, sat []int, secSize int, st
 		return mem, startPos, streamLen, nil
 	}
 
-	// For fragmented streams, return the first slice for now
+	// For fragmented streams, rebuild a contiguous byte slice.
 	if len(slices) > 0 {
-		startPos := slices[0].start
-		streamLen := slices[0].end - startPos
-		if streamLen > expectedStreamSize {
-			streamLen = expectedStreamSize
+		result := make([]byte, 0, expectedStreamSize)
+		for _, part := range slices {
+			if part.start < 0 || part.end > len(mem) || part.start >= part.end {
+				continue
+			}
+			result = append(result, mem[part.start:part.end]...)
+			if len(result) >= expectedStreamSize {
+				result = result[:expectedStreamSize]
+				break
+			}
 		}
-		return mem, startPos, streamLen, nil
+		return result, 0, expectedStreamSize, nil
 	}
 
 	return nil, 0, 0, nil

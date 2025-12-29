@@ -60,6 +60,7 @@ type options struct {
 	includeSheetPattern []*regexp.Regexp
 	excludeSheetPattern []*regexp.Regexp
 	mergeCells          bool
+	ignoreWorkbookCorruption bool
 }
 
 type csvWriter struct {
@@ -115,6 +116,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	escape := fs.Bool("e", false, "escape \\r\\n\\t characters")
 	fs.BoolVar(escape, "escape", false, "escape \\r\\n\\t characters")
+
+	ignoreWorkbookCorruption := fs.Bool("ignore-workbook-corruption", false, "ignore workbook corruption")
 
 	sheetDelimiter := fs.String("p", defaultSheetDelimiter, "sheet delimiter")
 	fs.StringVar(sheetDelimiter, "sheetdelimiter", defaultSheetDelimiter, "sheet delimiter")
@@ -228,6 +231,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		includeSheetPattern: includeRegex,
 		excludeSheetPattern: excludeRegex,
 		mergeCells:          *mergeCells,
+		ignoreWorkbookCorruption: *ignoreWorkbookCorruption,
 	}
 
 	inputPath := rest[0]
@@ -477,6 +481,7 @@ func convertFile(inputPath string, content []byte, outputPath string, opts optio
 	openOpts := &xlrd.OpenWorkbookOptions{
 		FormattingInfo: true,
 		FileContents:   content,
+		IgnoreWorkbookCorruption: opts.ignoreWorkbookCorruption,
 	}
 	book, err := xlrd.OpenWorkbook(inputPath, openOpts)
 	if err != nil {

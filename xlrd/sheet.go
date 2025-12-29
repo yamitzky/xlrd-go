@@ -472,6 +472,8 @@ func (s *Sheet) read(bk *Book) error {
 	s.cellValues = make([][]interface{}, 0)
 	s.cellTypes = make([][]int, 0)
 	s.cellXFIndexes = make([][]int, 0)
+	dimRows := 0
+	dimCols := 0
 
 	// Parse BIFF records until EOF or end of sheet stream
 	for {
@@ -527,12 +529,27 @@ func (s *Sheet) read(bk *Book) error {
 				lastColx := int(binary.LittleEndian.Uint16(data[dataLen-2 : dataLen]))
 
 				pos := 4
-				for colx := firstColx; colx <= lastColx && pos+4 <= dataLen-2; colx++ {
+				for colx := firstColx; colx <= lastColx && pos+6 <= dataLen-2; colx++ {
 					xfIndex := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 					rkData := data[pos+2 : pos+6]
 					rkValue := unpackRK(rkData)
 					s.putCell(rowx, colx, XL_CELL_NUMBER, rkValue, xfIndex)
-					pos += 4
+					pos += 6
+				}
+			}
+		case XL_DIMENSION, XL_DIMENSION2:
+			if dataLen == 0 {
+				break
+			}
+			if bk.BiffVersion < 80 {
+				if dataLen >= 8 {
+					dimRows = int(binary.LittleEndian.Uint16(data[2:4]))
+					dimCols = int(binary.LittleEndian.Uint16(data[6:8]))
+				}
+			} else {
+				if dataLen >= 12 {
+					dimRows = int(binary.LittleEndian.Uint32(data[4:8]))
+					dimCols = int(binary.LittleEndian.Uint16(data[10:12]))
 				}
 			}
 		case XL_LABEL:
@@ -540,19 +557,74 @@ func (s *Sheet) read(bk *Book) error {
 				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
 				colx := int(binary.LittleEndian.Uint16(data[2:4]))
 				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
-				// Parse string using UnpackString
+				// Parse string using BIFF record format
 				if dataLen > 6 {
-					value, err := UnpackString(data, 6, bk.Encoding, 1)
-					if err == nil && value != "" {
+					enc := bk.Encoding
+					if enc == "" {
+						enc = bk.deriveEncoding()
+					}
+					var value string
+					var err error
+					if bk.BiffVersion < BIFF_FIRST_UNICODE {
+						value, err = UnpackString(data, 6, enc, 2)
+					} else {
+						value, err = UnpackUnicode(data, 6, 2)
+					}
+					if err == nil {
 						s.putCell(rowx, colx, XL_CELL_TEXT, value, xfIndex)
 					}
 				}
+			}
+		case XL_LABEL_B2:
+			if dataLen >= 7 {
+				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+				colx := int(binary.LittleEndian.Uint16(data[2:4]))
+				enc := bk.Encoding
+				if enc == "" {
+					enc = bk.deriveEncoding()
+				}
+				value, err := UnpackString(data, 7, enc, 1)
+				if err == nil {
+					s.putCell(rowx, colx, XL_CELL_TEXT, value, 0)
+				}
+			}
+		case XL_INTEGER:
+			if dataLen >= 9 {
+				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+				colx := int(binary.LittleEndian.Uint16(data[2:4]))
+				value := float64(binary.LittleEndian.Uint16(data[7:9]))
+				s.putCell(rowx, colx, XL_CELL_NUMBER, value, 0)
+			}
+		case XL_BOOLERR_B2:
+			if dataLen >= 9 {
+				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+				colx := int(binary.LittleEndian.Uint16(data[2:4]))
+				value := data[7]
+				isErr := data[8]
+				if isErr != 0 {
+					s.putCell(rowx, colx, XL_CELL_ERROR, value, 0)
+				} else {
+					s.putCell(rowx, colx, XL_CELL_BOOLEAN, value, 0)
+				}
+			}
+		case XL_BLANK_B2:
+			if dataLen >= 7 {
+				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+				colx := int(binary.LittleEndian.Uint16(data[2:4]))
+				s.putCell(rowx, colx, XL_CELL_BLANK, "", 0)
 			}
 		case XL_FORMULA, XL_FORMULA3, XL_FORMULA4:
 			s.handleFormula(bk, data, dataLen)
 		case XL_MERGEDCELLS:
 			s.handleMergedCells(data, dataLen)
 		}
+	}
+
+	if dimRows > s.NRows {
+		s.NRows = dimRows
+	}
+	if s.NCols == 0 && dimCols > 0 {
+		s.NCols = dimCols
 	}
 
 	return nil
@@ -659,35 +731,23 @@ func unpackRK(rkData []byte) float64 {
 		return 0.0
 	}
 
-	rkValue := binary.LittleEndian.Uint32(rkData)
-	flags := rkValue & 3 // Lower 2 bits are flags
-
+	flags := rkData[0]
 	if flags&2 != 0 {
-		// Signed 30-bit integer
-		i := int32(rkValue) >> 2 // Shift right by 2 to drop flag bits
-		result := float64(i)
+		i := int32(binary.LittleEndian.Uint32(rkData))
+		i >>= 2
 		if flags&1 != 0 {
-			result /= 100.0
+			return float64(i) / 100.0
 		}
-		return result
-	} else {
-		// IEEE 754 64-bit float (30 most significant bits)
-		// Reconstruct the 64-bit float from 30 bits + 2 flag bits
-		// Python: b'\0\0\0\0' + BYTES_LITERAL(chr(flags & 252)) + rk_str[1:4]
-		flagsByte := byte(flags)
-		rkDataByte0 := rkData[0]
-		msb := (flagsByte & 0xFC) | ((rkDataByte0 & 0xC0) >> 6) // Clear lower 2 bits, add 2 bits from rkData[0]
-		middle := []byte{rkData[1], rkData[2], rkData[3]}
-
-		// Create 64-bit IEEE 754 float bytes: 4 zero bytes + reconstructed bytes
-		floatBytes := []byte{0, 0, 0, 0, msb, middle[0], middle[1], middle[2]}
-		bits := binary.LittleEndian.Uint64(floatBytes)
-		result := math.Float64frombits(bits)
-		if flags&1 != 0 {
-			result /= 100.0
-		}
-		return result
+		return float64(i)
 	}
+
+	floatBytes := []byte{0, 0, 0, 0, rkData[0] & 0xFC, rkData[1], rkData[2], rkData[3]}
+	bits := binary.LittleEndian.Uint64(floatBytes)
+	result := math.Float64frombits(bits)
+	if flags&1 != 0 {
+		result /= 100.0
+	}
+	return result
 }
 
 // stringRecordContents parses a STRING record's content.

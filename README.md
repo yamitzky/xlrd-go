@@ -74,3 +74,4 @@ Notes:
 - Only `.xls` files are supported.
 - `--outputencoding` currently supports `utf-8` only.
 - `--hyperlinks` is parsed but not supported yet.
+- `--ignore-workbook-corruption` skips workbook corruption checks.

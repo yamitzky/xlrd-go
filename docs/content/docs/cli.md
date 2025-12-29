@@ -50,6 +50,7 @@ Options:
 - `-I, --include_sheet_pattern`: include sheet names matching patterns (when `-a`)
 - `-E, --exclude_sheet_pattern`: exclude sheet names matching patterns (when `-a`)
 - `-m, --merge-cells`: expand merged cells to their top-left value
+- `--ignore-workbook-corruption`: ignore workbook corruption checks
 
 ## Examples
 

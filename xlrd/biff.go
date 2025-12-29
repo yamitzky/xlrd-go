@@ -3,7 +3,6 @@ package xlrd
 import (
 	"encoding/binary"
 	"fmt"
-	"os"
 	"unicode/utf16"
 
 	"golang.org/x/text/encoding/charmap"
@@ -38,10 +37,7 @@ func UnpackString(data []byte, pos int, encoding string, lenlen int) (string, er
 		for i := 0; i < len(words); i++ {
 			words[i] = binary.LittleEndian.Uint16(strBytes[i*2 : (i+1)*2])
 		}
-		result := string(utf16.Decode(words))
-		// Debug: log hex dump of input bytes and result
-		fmt.Fprintf(os.Stderr, "DEBUG UnpackString: input bytes: %x, result: %q\n", strBytes, result)
-		return result, nil
+		return string(utf16.Decode(words)), nil
 	}
 	
 	// For other encodings, treat as Latin-1 for now

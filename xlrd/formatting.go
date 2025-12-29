@@ -237,16 +237,35 @@ func IsDateFormatString(book *Book, formatStr string) bool {
 
 	dateCount := 0
 	numCount := 0
+	gotSep := false
+	separator := ';'
 	for _, c := range reducedFmt {
 		if count, ok := dateCharDict[c]; ok {
 			dateCount += count
 		} else if count, ok := numCharDict[c]; ok {
 			numCount += count
+		} else if c == separator {
+			gotSep = true
 		}
 	}
 
-	// Date format if it has date chars and no number chars
-	return dateCount > 0 && numCount == 0
+	if dateCount > 0 && numCount == 0 {
+		return true
+	}
+	if numCount > 0 && dateCount == 0 {
+		return false
+	}
+	if dateCount > 0 {
+		if book.verbosity >= 1 {
+			fmt.Fprintf(book.logfile,
+				"WARNING *** is_date_format: ambiguous d=%d n=%d fmt=%q\n",
+				dateCount, numCount, formatStr)
+		}
+	}
+	if !gotSep && dateCount == 0 && book.verbosity >= 1 {
+		fmt.Fprintf(book.logfile, "WARNING *** format %q produces constant result\n", formatStr)
+	}
+	return dateCount > numCount
 }
 
 // NearestColourIndex finds the nearest colour index for a given RGB value.

@@ -977,7 +977,7 @@ func (b *Book) handleFormat(data []byte) error {
 	if b.BiffVersion >= 80 {
 		// BIFF8: UTF-16LE encoded
 		if pos < len(data) {
-			formatString, err := UnpackUnicode(data, pos, 0)
+			formatString, err := UnpackUnicode(data, pos, 2)
 			if err == nil {
 				format.FormatString = formatString
 			}
@@ -1265,77 +1265,20 @@ func (b *Book) handleSST(data []byte) error {
 		return nil // Not enough data
 	}
 
-	// Number of unique strings
-	numStrings := int(binary.LittleEndian.Uint32(data[0:4]))
+	// Number of unique strings (BIFF8 SST header)
+	numStrings := int(binary.LittleEndian.Uint32(data[4:8]))
 
-	b.sharedStrings = make([]string, 0, numStrings)
-
-	pos := 8 // Skip header
-
-	for i := 0; i < numStrings && pos < len(data); i++ {
-		if pos+2 > len(data) {
+	strlist := [][]byte{data}
+	for {
+		code, _, cont := b.getRecordPartsConditional(XL_CONTINUE)
+		if code == 0 {
 			break
 		}
-
-		// Number of characters
-		nchars := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		pos += 2
-
-		if pos >= len(data) {
-			break
-		}
-
-		// Options byte
-		options := data[pos]
-		pos++
-
-		// Skip richtext and phonetic info for now
-		if (options & 0x08) != 0 { // richtext
-			if pos+2 > len(data) {
-				break
-			}
-			pos += 2
-		}
-		if (options & 0x04) != 0 { // phonetic
-			if pos+4 > len(data) {
-				break
-			}
-			pos += 4
-		}
-
-		var str string
-		if (options & 0x01) != 0 { // Uncompressed UTF-16
-			strLen := nchars * 2
-			if pos+strLen > len(data) {
-				break
-			}
-			utf16Bytes := data[pos : pos+strLen]
-			// Convert UTF-16 LE to string
-			words := make([]uint16, nchars)
-			for j := 0; j < nchars; j++ {
-				words[j] = binary.LittleEndian.Uint16(utf16Bytes[j*2 : (j+1)*2])
-			}
-			str = string(utf16.Decode(words))
-			pos += strLen
-		} else { // Compressed (Latin-1)
-			strLen := nchars
-			if pos+strLen > len(data) {
-				break
-			}
-			// Convert Latin-1 to UTF-8
-			latin1Bytes := data[pos : pos+strLen]
-			utf8Bytes, err := charmap.ISO8859_1.NewDecoder().Bytes(latin1Bytes)
-			if err != nil {
-				str = string(latin1Bytes) // fallback
-			} else {
-				str = string(utf8Bytes)
-			}
-			pos += strLen
-		}
-
-		b.sharedStrings = append(b.sharedStrings, str)
+		strlist = append(strlist, cont)
 	}
 
+	shared, _ := UnpackSSTTable(strlist, numStrings)
+	b.sharedStrings = shared
 	return nil
 }
 
@@ -1828,49 +1771,35 @@ func UnpackSSTTable(datatab [][]byte, nstrings int) ([]string, map[int][][]int) 
 			break
 		}
 
-		// Number of characters
 		nchars := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 		pos += 2
-
 		if pos >= datalen {
 			break
 		}
 
-		// Options byte
 		options := data[pos]
 		pos++
 
 		rtcount := 0
+		phosz := 0
 		if options&0x08 != 0 { // richtext
-			if pos+2 > datalen {
-				break
-			}
 			rtcount = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 			pos += 2
 		}
-
 		if options&0x04 != 0 { // phonetic
-			if pos+4 > datalen {
-				break
-			}
-			pos += 4 // Skip phonetic size
+			phosz = int(binary.LittleEndian.Uint32(data[pos : pos+4]))
+			pos += 4
 		}
 
-		var accstrg string
+		accstrg := ""
 		charsgot := 0
-
 		for charsgot < nchars {
 			charsneed := nchars - charsgot
 			charsavail := 0
-
 			if options&0x01 != 0 {
 				// Uncompressed UTF-16
 				charsavail = min((datalen-pos)>>1, charsneed)
-				if pos+2*charsavail > datalen {
-					break
-				}
 				rawstrg := data[pos : pos+2*charsavail]
-				// Convert UTF-16 LE to string
 				words := make([]uint16, charsavail)
 				for j := 0; j < charsavail; j++ {
 					words[j] = binary.LittleEndian.Uint16(rawstrg[j*2 : (j+1)*2])
@@ -1880,14 +1809,10 @@ func UnpackSSTTable(datatab [][]byte, nstrings int) ([]string, map[int][][]int) 
 			} else {
 				// Compressed (Latin-1)
 				charsavail = min(datalen-pos, charsneed)
-				if pos+charsavail > datalen {
-					break
-				}
 				rawstrg := data[pos : pos+charsavail]
-				// Convert Latin-1 to UTF-8
 				utf8Bytes, err := charmap.ISO8859_1.NewDecoder().Bytes(rawstrg)
 				if err != nil {
-					accstrg += string(rawstrg) // fallback
+					accstrg += string(rawstrg)
 				} else {
 					accstrg += string(utf8Bytes)
 				}
@@ -1895,30 +1820,31 @@ func UnpackSSTTable(datatab [][]byte, nstrings int) ([]string, map[int][][]int) 
 			}
 
 			charsgot += charsavail
-
 			if charsgot == nchars {
 				break
 			}
 
-			// Move to next data block
 			datainx++
-			if datainx < ndatas {
-				data = datatab[datainx]
-				datalen = len(data)
-				if datalen > 0 {
-					options = data[0]
-					pos = 1
-				}
-			} else {
+			if datainx >= ndatas {
 				break
 			}
+			data = datatab[datainx]
+			datalen = len(data)
+			options = data[0]
+			pos = 1
 		}
 
 		if rtcount > 0 {
 			runs := make([][]int, 0, rtcount)
 			for runindex := 0; runindex < rtcount; runindex++ {
-				if pos+4 > datalen {
-					break
+				if pos == datalen {
+					pos = 0
+					datainx++
+					if datainx >= ndatas {
+						break
+					}
+					data = datatab[datainx]
+					datalen = len(data)
 				}
 				run1 := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 				run2 := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
@@ -1928,12 +1854,11 @@ func UnpackSSTTable(datatab [][]byte, nstrings int) ([]string, map[int][][]int) 
 			richtextRuns[len(strings)] = runs
 		}
 
-		// Skip phonetic data
-		if options&0x04 != 0 {
-			// Skip remaining phonetic data if any
-			for pos >= datalen && datainx+1 < ndatas {
-				pos -= datalen
-				datainx++
+		pos += phosz
+		if pos >= datalen {
+			pos = pos - datalen
+			datainx++
+			if datainx < ndatas {
 				data = datatab[datainx]
 				datalen = len(data)
 			}
