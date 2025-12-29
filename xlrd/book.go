@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	SUPBOOK_UNK       = 0
-	SUPBOOK_INTERNAL  = 1
-	SUPBOOK_EXTERNAL  = 2
-	SUPBOOK_ADDIN     = 3
-	SUPBOOK_DDEOLE    = 4
+	SUPBOOK_UNK      = 0
+	SUPBOOK_INTERNAL = 1
+	SUPBOOK_EXTERNAL = 2
+	SUPBOOK_ADDIN    = 3
+	SUPBOOK_DDEOLE   = 4
 )
 
 // Book represents the contents of a "workbook".
@@ -88,35 +88,35 @@ type Book struct {
 	LoadTimeStage2 float64
 
 	// Internal fields
-	sheetList        []*Sheet
-	sheetNames       []string
-	sheetAbsPosn     []int // Absolute positions of sheets in the stream
-	sheetStreamLen   []int // Stream lengths of sheets
-	sheetVisibility  []int
-	onDemand         bool
-	logfile          io.Writer
-	verbosity        int
-	mem              []byte
-	base              int
-	streamLen         int
-	position          int
-	filestr           []byte
+	sheetList                []*Sheet
+	sheetNames               []string
+	sheetAbsPosn             []int // Absolute positions of sheets in the stream
+	sheetStreamLen           []int // Stream lengths of sheets
+	sheetVisibility          []int
+	onDemand                 bool
+	logfile                  io.Writer
+	verbosity                int
+	mem                      []byte
+	base                     int
+	streamLen                int
+	position                 int
+	filestr                  []byte
 	formattingInfo           bool
 	raggedRows               bool
 	encodingOverride         string
 	ignoreWorkbookCorruption bool
-	sharedStrings     []string
+	sharedStrings            []string
 
 	// External reference handling
-	supbookCount         int
-	supbookLocalsInx     *int
-	supbookAddinsInx     *int
-	externsheetInfo      [][]int
-	externsheetTypeB57   []int
-	extnshtNameFromNum   map[int]string
-	extnshtCount         int
-	supbookTypes         []int
-	addinFuncNames       []string
+	supbookCount       int
+	supbookLocalsInx   *int
+	supbookAddinsInx   *int
+	externsheetInfo    [][]int
+	externsheetTypeB57 []int
+	extnshtNameFromNum map[int]string
+	extnshtCount       int
+	supbookTypes       []int
+	addinFuncNames     []string
 }
 
 // Name represents information relating to a named reference, formula, macro, etc.
@@ -301,13 +301,13 @@ func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) 
 // OpenWorkbookXLS opens an XLS workbook file.
 func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, error) {
 	bk := &Book{
-		sheetList:           []*Sheet{},
-		sheetNames:          []string{},
-		externsheetInfo:     [][]int{},
-		externsheetTypeB57:  []int{},
-		extnshtNameFromNum:  make(map[int]string),
-		supbookTypes:        []int{},
-		addinFuncNames:      []string{},
+		sheetList:          []*Sheet{},
+		sheetNames:         []string{},
+		externsheetInfo:    [][]int{},
+		externsheetTypeB57: []int{},
+		extnshtNameFromNum: make(map[int]string),
+		supbookTypes:       []int{},
+		addinFuncNames:     []string{},
 	}
 
 	if options == nil {
@@ -318,7 +318,7 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 	if options.Logfile == nil {
 		options.Logfile = os.Stdout
 	}
-	
+
 	bk.logfile = options.Logfile
 	bk.verbosity = options.Verbosity
 	bk.onDemand = options.OnDemand
@@ -326,21 +326,21 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 	bk.raggedRows = options.RaggedRows
 	bk.encodingOverride = options.EncodingOverride
 	bk.ignoreWorkbookCorruption = options.IgnoreWorkbookCorruption
-	
+
 	// Read file
 	fileContents, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if len(fileContents) == 0 {
 		return nil, NewXLRDError("File size is 0 bytes")
 	}
-	
+
 	bk.filestr = fileContents
 	bk.streamLen = len(fileContents)
 	bk.base = 0
-	
+
 	// Check if it's an OLE2 compound document
 	if len(fileContents) >= 8 && string(fileContents[:8]) == string(XLS_SIGNATURE) {
 		// It's an OLE2 compound document
@@ -348,7 +348,7 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 		if err != nil {
 			return nil, err
 		}
-		
+
 		// Try to locate Workbook or Book stream
 		var mem []byte
 		var base, streamLen int
@@ -373,19 +373,19 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 			}
 			return nil, NewXLRDError("Can't find workbook in OLE2 compound document")
 		}
-		
-	bk.mem = mem
-	bk.base = base
-	bk.streamLen = streamLen
+
+		bk.mem = mem
+		bk.base = base
+		bk.streamLen = streamLen
 	} else {
 		// Not an OLE2 compound document - treat as raw BIFF file
 		bk.mem = fileContents
 		bk.base = 0
 		bk.streamLen = len(fileContents)
 	}
-	
+
 	bk.position = bk.base
-	
+
 	// Parse BIFF records to extract sheet names and other information
 	err = bk.parseGlobals(options)
 	if err != nil {
@@ -408,11 +408,11 @@ func (b *Book) parseGlobals(options *OpenWorkbookOptions) error {
 	if err != nil {
 		return err
 	}
-	
+
 	if biffVersion == 0 {
 		return NewXLRDError("Can't determine file's BIFF version")
 	}
-	
+
 	// Check if version is supported
 	supported := false
 	for _, v := range SupportedVersions {
@@ -424,9 +424,9 @@ func (b *Book) parseGlobals(options *OpenWorkbookOptions) error {
 	if !supported {
 		return NewXLRDError("BIFF version %s is not supported", BiffTextFromNum(biffVersion))
 	}
-	
+
 	b.BiffVersion = biffVersion
-	
+
 	// Parse records based on BIFF version
 	if biffVersion <= 40 {
 		// BIFF 4.0 and earlier - no workbook globals, only 1 worksheet
@@ -454,7 +454,7 @@ func (b *Book) parseGlobals(options *OpenWorkbookOptions) error {
 			}
 		}
 	}
-	
+
 	b.NSheets = len(b.sheetList)
 	return nil
 }
@@ -464,10 +464,10 @@ func (b *Book) getBOF(rqdStream int) (int, error) {
 	if b.position+4 > len(b.mem) {
 		return 0, NewXLRDError("Expected BOF record; met end of file")
 	}
-	
+
 	opcode := int(binary.LittleEndian.Uint16(b.mem[b.position : b.position+2]))
 	b.position += 2
-	
+
 	// Check if it's a valid BOF code
 	validBOF := false
 	for _, code := range bofcodes {
@@ -479,36 +479,36 @@ func (b *Book) getBOF(rqdStream int) (int, error) {
 	if !validBOF {
 		return 0, NewXLRDError("Expected BOF record; found 0x%04x", opcode)
 	}
-	
+
 	if b.position+2 > len(b.mem) {
 		return 0, NewXLRDError("Incomplete BOF record; met end of file")
 	}
-	
+
 	length := int(binary.LittleEndian.Uint16(b.mem[b.position : b.position+2]))
 	b.position += 2
-	
+
 	if length < 4 || length > 20 {
 		return 0, NewXLRDError("Invalid length (%d) for BOF record type 0x%04x", length, opcode)
 	}
-	
+
 	expectedLen, ok := boflen[opcode]
 	if !ok {
 		return 0, NewXLRDError("Unknown BOF record type 0x%04x", opcode)
 	}
-	
+
 	if b.position+length > len(b.mem) {
 		return 0, NewXLRDError("Incomplete BOF record; met end of file")
 	}
-	
+
 	data := b.mem[b.position : b.position+length]
 	b.position += length
-	
+
 	// Pad if necessary
 	if length < expectedLen {
 		padding := make([]byte, expectedLen-length)
 		data = append(data, padding...)
 	}
-	
+
 	version1 := opcode >> 8
 	version2 := binary.LittleEndian.Uint16(data[0:2])
 	streamtype := binary.LittleEndian.Uint16(data[2:4])
@@ -569,23 +569,23 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 
 	// Set encoding with override if provided, or derive from codepage
 	b.Encoding = b.deriveEncoding()
-	
+
 	for b.position < len(b.mem) {
 		if b.position+4 > len(b.mem) {
 			break
 		}
-		
+
 		code := int(binary.LittleEndian.Uint16(b.mem[b.position : b.position+2]))
 		length := int(binary.LittleEndian.Uint16(b.mem[b.position+2 : b.position+4]))
 		b.position += 4
-		
+
 		if b.position+length > len(b.mem) {
 			break
 		}
-		
+
 		data := b.mem[b.position : b.position+length]
 		b.position += length
-		
+
 		switch code {
 		case XL_EOF:
 			break
@@ -675,13 +675,13 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 // handleBoundsheet handles a BOUNDSHEET record.
 func (b *Book) handleBoundsheet(data []byte) error {
 	bv := b.BiffVersion
-	
+
 	var sheetName string
 	var visibility int
 	var absPosn int
 	var sheetType int
 	var err error
-	
+
 	if bv == 45 {
 		// BIFF 4W - only sheet name
 		sheetName, err = UnpackString(data, 0, b.Encoding, 1)
@@ -690,10 +690,10 @@ func (b *Book) handleBoundsheet(data []byte) error {
 		}
 		visibility = 0
 		sheetType = XL_BOUNDSHEET_WORKSHEET // guess, patch later
-			if len(b.sheetAbsPosn) == 0 {
-				// For BIFF4W, sheets are embedded in the global stream
-				// _sheetsoffset would be calculated here, but for now use base
-				absPosn = b.base
+		if len(b.sheetAbsPosn) == 0 {
+			// For BIFF4W, sheets are embedded in the global stream
+			// _sheetsoffset would be calculated here, but for now use base
+			absPosn = b.base
 			// Note (a) this won't be used
 			// (b) it's the position of the SHEETHDR record
 			// (c) add 11 to get to the worksheet BOF record
@@ -704,12 +704,12 @@ func (b *Book) handleBoundsheet(data []byte) error {
 		if len(data) < 6 {
 			return NewXLRDError("BOUNDSHEET record too short")
 		}
-		
+
 		offset := int(int32(binary.LittleEndian.Uint32(data[0:4])))
 		visibility = int(data[4])
 		sheetType = int(data[5])
 		absPosn = offset + b.base // because global BOF is always at posn 0 in the stream
-		
+
 		if bv < BIFF_FIRST_UNICODE {
 			sheetName, err = UnpackString(data, 6, b.Encoding, 1)
 		} else {
@@ -719,14 +719,14 @@ func (b *Book) handleBoundsheet(data []byte) error {
 			return err
 		}
 	}
-	
+
 	if sheetType == XL_BOUNDSHEET_WORKSHEET {
 		b.sheetNames = append(b.sheetNames, sheetName)
 		b.sheetList = append(b.sheetList, nil)
 		b.sheetAbsPosn = append(b.sheetAbsPosn, absPosn)
 		b.sheetVisibility = append(b.sheetVisibility, visibility)
 	}
-	
+
 	return nil
 }
 
@@ -1225,22 +1225,22 @@ func (b *Book) deriveEncoding() string {
 		b.Codepage = &codepage
 		return "utf_16_le"
 	}
-	
+
 	codepage := *b.Codepage
 	if enc, ok := EncodingFromCodepage[codepage]; ok {
 		return enc
 	}
-	
+
 	if codepage >= 300 && codepage <= 1999 {
 		return fmt.Sprintf("cp%d", codepage)
 	}
-	
+
 	if b.BiffVersion >= 80 {
 		codepage = 1200
 		b.Codepage = &codepage
 		return "utf_16_le"
 	}
-	
+
 	return fmt.Sprintf("unknown_codepage_%d", codepage)
 }
 
@@ -1270,12 +1270,12 @@ func (b *Book) getSheet(shNumber int) (*Sheet, error) {
 	if shNumber < 0 || shNumber >= len(b.sheetNames) {
 		return nil, NewXLRDError("sheet index %d out of range", shNumber)
 	}
-	
+
 	// Set position to sheet's absolute position
 	if shNumber >= len(b.sheetAbsPosn) {
 		return nil, NewXLRDError("sheet position not found for sheet %d", shNumber)
 	}
-	
+
 	b.position = b.sheetAbsPosn[shNumber]
 
 	// Get BOF record for worksheet
@@ -1283,24 +1283,24 @@ func (b *Book) getSheet(shNumber int) (*Sheet, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Create sheet
 	sheet := &Sheet{
-		Book:          b,
-		Name:          b.sheetNames[shNumber],
-		ColInfoMap:    make(map[int]*ColInfo),
-		RowInfoMap:    make(map[int]*RowInfo),
+		Book:           b,
+		Name:           b.sheetNames[shNumber],
+		ColInfoMap:     make(map[int]*ColInfo),
+		RowInfoMap:     make(map[int]*RowInfo),
 		ColLabelRanges: make([][4]int, 0),
 		RowLabelRanges: make([][4]int, 0),
-		MergedCells:   make([][4]int, 0),
+		MergedCells:    make([][4]int, 0),
 	}
-	
+
 	// Read sheet data
 	err = sheet.read(b)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return sheet, nil
 }
 
