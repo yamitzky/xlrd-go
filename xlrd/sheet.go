@@ -369,10 +369,9 @@ func (s *Sheet) read(bk *Book) error {
 			break
 		}
 	}
-
 	var maxPosition int
-	if sheetIndex >= 0 && sheetIndex < len(bk.sheetStreamLen) {
-		maxPosition = bk.sheetAbsPosn[sheetIndex] + bk.sheetStreamLen[sheetIndex]
+	if sheetIndex >= 0 && sheetIndex < len(bk.sheetAbsPosn)-1 {
+		maxPosition = bk.sheetAbsPosn[sheetIndex+1]
 	} else {
 		maxPosition = len(bk.mem)
 	}
@@ -392,7 +391,6 @@ func (s *Sheet) read(bk *Book) error {
 			break
 		}
 
-		// Debug all records for first sheet
 
 		// Debug for column B records
 		switch rc {
@@ -403,6 +401,9 @@ func (s *Sheet) read(bk *Book) error {
 				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
 				bits := binary.LittleEndian.Uint64(data[6:14])
 				value := math.Float64frombits(bits)
+				if s.Name == "PROFILEDEF" {
+					fmt.Fprintf(bk.logfile, "DEBUG: %s XL_NUMBER at (%d,%d): value=%f, xf=%d\n", s.Name, rowx, colx, value, xfIndex)
+				}
 				s.putCell(rowx, colx, XL_CELL_NUMBER, value, xfIndex)
 			}
 		case XL_LABELSST:
@@ -421,8 +422,27 @@ func (s *Sheet) read(bk *Book) error {
 				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
 				colx := int(binary.LittleEndian.Uint16(data[2:4]))
 				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
-				rkValue := unpackRK(data[6:10])
+				rkData := data[6:10]
+				rkValue := unpackRK(rkData)
+				if s.Name == "PROFILEDEF" || rkValue == 100.0 {
+					fmt.Printf("DEBUG: %s XL_RK at (%d,%d): rkData=%x, value=%f, xf=%d\n", s.Name, rowx, colx, rkData, rkValue, xfIndex)
+				}
 				s.putCell(rowx, colx, XL_CELL_NUMBER, rkValue, xfIndex)
+			}
+		case XL_MULRK:
+			if dataLen >= 6 {
+				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+				firstColx := int(binary.LittleEndian.Uint16(data[2:4]))
+				lastColx := int(binary.LittleEndian.Uint16(data[dataLen-2 : dataLen]))
+
+				pos := 4
+				for colx := firstColx; colx <= lastColx && pos+4 <= dataLen-2; colx++ {
+					xfIndex := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+					rkData := data[pos+2 : pos+6]
+					rkValue := unpackRK(rkData)
+					s.putCell(rowx, colx, XL_CELL_NUMBER, rkValue, xfIndex)
+					pos += 4
+				}
 			}
 		case XL_LABEL:
 			if dataLen >= 6 {
@@ -439,10 +459,35 @@ func (s *Sheet) read(bk *Book) error {
 			}
 		case XL_FORMULA, XL_FORMULA3, XL_FORMULA4:
 			s.handleFormula(bk, data, dataLen)
+		case XL_MERGEDCELLS:
+			s.handleMergedCells(data, dataLen)
 		}
 	}
 
 	return nil
+}
+
+// handleMergedCells processes XL_MERGEDCELLS records.
+func (s *Sheet) handleMergedCells(data []byte, dataLen int) {
+	if dataLen < 2 {
+		return
+	}
+
+	numRanges := int(binary.LittleEndian.Uint16(data[0:2]))
+	pos := 2
+
+	for i := 0; i < numRanges && pos+8 <= dataLen; i++ {
+		row1 := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		row2 := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+		col1 := int(binary.LittleEndian.Uint16(data[pos+4 : pos+6]))
+		col2 := int(binary.LittleEndian.Uint16(data[pos+6 : pos+8]))
+
+		// Excel stores merged ranges as (start_row, end_row, start_col, end_col) where end is inclusive
+		// Python xlrd adds 1 to end_row and end_col to match Python slice conventions
+		// We follow the same convention for compatibility
+		s.MergedCells = append(s.MergedCells, [4]int{row1, row2 + 1, col1, col2 + 1})
+		pos += 8
+	}
 }
 
 // handleFormula processes XL_FORMULA, XL_FORMULA3, and XL_FORMULA4 records.

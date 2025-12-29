@@ -48,9 +48,6 @@ func TestStringCell(t *testing.T) {
 }
 
 func TestNumberCell(t *testing.T) {
-	// TODO: Implement proper XL_NUMBER record parsing
-	// Currently XL_NUMBER records are not being read from the OLE2 stream
-	// This needs OLE2 compound document parsing fixes
 	book, err := OpenWorkbook(fromSample("profiles.xls"), &OpenWorkbookOptions{FormattingInfo: true})
 	if err != nil {
 		t.Fatalf("Failed to open workbook: %v", err)
@@ -59,14 +56,19 @@ func TestNumberCell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get sheet: %v", err)
 	}
-	// For now, just test that we can access cells without panicking
-	cell := sheet.Cell(1, 2)
-	_ = cell // Use the cell to avoid unused variable error
-	// TODO: Re-enable proper test when XL_NUMBER parsing is fixed
+	cell := sheet.Cell(1, 1)
+	if cell.CType != XL_CELL_NUMBER {
+		t.Errorf("cell.CType = %d, want %d", cell.CType, XL_CELL_NUMBER)
+	}
+	if cell.Value != 100.0 {
+		t.Errorf("cell.Value = %v, want 100.0", cell.Value)
+	}
+	if cell.XFIndex != 21 {
+		t.Errorf("cell.XFIndex = %d, want 21", cell.XFIndex)
+	}
 }
 
 func TestCalculatedCell(t *testing.T) {
-	// TODO: Implement formula evaluation
 	book, err := OpenWorkbook(fromSample("profiles.xls"), &OpenWorkbookOptions{FormattingInfo: true})
 	if err != nil {
 		t.Fatalf("Failed to open workbook: %v", err)
@@ -75,13 +77,19 @@ func TestCalculatedCell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get sheet: %v", err)
 	}
-	// For now, just test that we can access the sheet
-	_ = sheet
-	// TODO: Re-enable proper test when formula evaluation is implemented
+	cell := sheet.Cell(1, 3)
+	if cell.CType != XL_CELL_NUMBER {
+		t.Errorf("cell.CType = %d, want %d", cell.CType, XL_CELL_NUMBER)
+	}
+	if !almostEqual(cell.Value.(float64), 265.131, 0.001) {
+		t.Errorf("cell.Value = %v, want approximately 265.131", cell.Value)
+	}
+	if cell.XFIndex != 29 {
+		t.Errorf("cell.XFIndex = %d, want 29", cell.XFIndex)
+	}
 }
 
 func TestMergedCells(t *testing.T) {
-	// TODO: Implement merged cell handling
 	book, err := OpenWorkbook(fromSample("xf_class.xls"), &OpenWorkbookOptions{FormattingInfo: true})
 	if err != nil {
 		t.Fatalf("Failed to open workbook: %v", err)
@@ -90,9 +98,23 @@ func TestMergedCells(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get sheet: %v", err)
 	}
-	// For now, just test that we can access the sheet
-	_ = sheet
-	// TODO: Re-enable proper test when merged cell handling is implemented
+
+	// Check merged cells
+	if len(sheet.MergedCells) == 0 {
+		t.Error("Expected merged cells, but found none")
+		return
+	}
+
+	rowLo, rowHi, colLo, colHi := sheet.MergedCells[0][0], sheet.MergedCells[0][1], sheet.MergedCells[0][2], sheet.MergedCells[0][3]
+	if rowLo != 3 || rowHi != 7 || colLo != 2 || colHi != 5 {
+		t.Errorf("Merged cell range = (%d,%d,%d,%d), want (3,7,2,5)", rowLo, rowHi, colLo, colHi)
+	}
+
+	// Check the value of the merged cell
+	cell := sheet.Cell(rowLo, colLo)
+	if cell.Value != "MERGED" {
+		t.Errorf("Merged cell value = %v, want 'MERGED'", cell.Value)
+	}
 }
 
 // Helper function to compare floats with tolerance

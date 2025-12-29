@@ -151,20 +151,13 @@ func (b *Book) SheetByIndex(sheetx int) (*Sheet, error) {
 	if sheetx < 0 || sheetx >= len(b.sheetList) {
 		return nil, NewXLRDError("sheet index %d out of range", sheetx)
 	}
-	
-	// If sheet is already loaded, return it
+
+	// Sheet should already be loaded by readWorksheets
 	if b.sheetList[sheetx] != nil {
 		return b.sheetList[sheetx], nil
 	}
-	
-	// Load the sheet
-	sheet, err := b.getSheet(sheetx)
-	if err != nil {
-		return nil, err
-	}
-	
-	b.sheetList[sheetx] = sheet
-	return sheet, nil
+
+	return nil, NewXLRDError("sheet %d not loaded", sheetx)
 }
 
 // SheetByName returns a sheet by its name.
@@ -374,7 +367,13 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 	if err != nil {
 		return nil, err
 	}
-	
+
+	// Read all worksheets
+	err = bk.readWorksheets(options)
+	if err != nil {
+		return nil, err
+	}
+
 	return bk, nil
 }
 
@@ -1158,6 +1157,18 @@ func (b *Book) getSheet(shNumber int) (*Sheet, error) {
 
 // getSheets loads all sheets in the workbook.
 func (b *Book) getSheets() error {
+	for sheetNo := 0; sheetNo < len(b.sheetNames); sheetNo++ {
+		sheet, err := b.getSheet(sheetNo)
+		if err != nil {
+			return err
+		}
+		b.sheetList[sheetNo] = sheet
+	}
+	return nil
+}
+
+// readWorksheets reads all worksheets in the workbook.
+func (b *Book) readWorksheets(options *OpenWorkbookOptions) error {
 	for sheetNo := 0; sheetNo < len(b.sheetNames); sheetNo++ {
 		sheet, err := b.getSheet(sheetNo)
 		if err != nil {
