@@ -2,7 +2,11 @@ package xlrd
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
+	"unicode/utf16"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Sheet contains the data for one worksheet.
@@ -365,6 +369,7 @@ func (s *Sheet) read(bk *Book) error {
 			break
 		}
 
+		// Debug for column B records
 		switch rc {
 		case XL_NUMBER:
 			if dataLen >= 14 {
@@ -399,8 +404,153 @@ func (s *Sheet) read(bk *Book) error {
 					}
 				}
 			}
+		case XL_FORMULA, XL_FORMULA3, XL_FORMULA4:
+			s.handleFormula(bk, data, dataLen)
 		}
 	}
 
 	return nil
+}
+
+// handleFormula processes XL_FORMULA, XL_FORMULA3, and XL_FORMULA4 records.
+func (s *Sheet) handleFormula(bk *Book, data []byte, dataLen int) {
+	if dataLen < 16 {
+		return
+	}
+
+	// Parse formula record header
+	rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+	colx := int(binary.LittleEndian.Uint16(data[2:4]))
+	xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
+	resultStr := data[6:14] // 8 bytes of cached result
+	_ = binary.LittleEndian.Uint16(data[14:16]) // flags (unused for now)
+
+	// Formula record parsed
+
+	// Check for string result (indicated by 0xFF 0xFF in last 2 bytes of result_str)
+	if len(resultStr) >= 2 && resultStr[6] == 0xFF && resultStr[7] == 0xFF {
+		firstByte := resultStr[0]
+		switch firstByte {
+		case 0:
+			// String result - need to read next STRING record
+			s.handleFormulaStringResult(bk, rowx, colx, xfIndex)
+		case 1:
+			// Boolean result
+			value := int(resultStr[2])
+			s.putCell(rowx, colx, XL_CELL_BOOLEAN, value, xfIndex)
+		case 2:
+			// Error result
+			value := int(resultStr[2])
+			s.putCell(rowx, colx, XL_CELL_ERROR, value, xfIndex)
+		case 3:
+			// Empty string result
+			s.putCell(rowx, colx, XL_CELL_TEXT, "", xfIndex)
+		default:
+			// Unknown special case - treat as empty
+			s.putCell(rowx, colx, XL_CELL_EMPTY, nil, xfIndex)
+		}
+	} else {
+		// Numeric result (IEEE 754 double)
+		if len(resultStr) >= 8 {
+			bits := binary.LittleEndian.Uint64(resultStr[0:8])
+			value := math.Float64frombits(bits)
+			s.putCell(rowx, colx, XL_CELL_NUMBER, value, xfIndex)
+		}
+	}
+
+	// TODO: Formula bytecode parsing would go here for actual formula evaluation
+	// For now, we only use cached results as xlrd does
+}
+
+// handleFormulaStringResult handles formulas that result in strings.
+// These are followed by a STRING record containing the actual string value.
+func (s *Sheet) handleFormulaStringResult(bk *Book, rowx, colx, xfIndex int) {
+	// Read the next record which should be a STRING record
+	rc, _, data := bk.getRecordParts()
+	if rc != XL_STRING && rc != XL_STRING_B2 {
+		// Not a string record - put empty cell
+		s.putCell(rowx, colx, XL_CELL_EMPTY, nil, xfIndex)
+		return
+	}
+
+	// Parse the string record using proper string record format
+	strg, err := s.stringRecordContents(bk, data)
+	if err != nil {
+		// Error parsing string - put empty cell
+		s.putCell(rowx, colx, XL_CELL_EMPTY, nil, xfIndex)
+		return
+	}
+
+	s.putCell(rowx, colx, XL_CELL_TEXT, strg, xfIndex)
+}
+
+// stringRecordContents parses a STRING record's content.
+// This is different from cell strings - formula result strings have their own format.
+func (s *Sheet) stringRecordContents(bk *Book, data []byte) (string, error) {
+	if len(data) < 2 {
+		return "", fmt.Errorf("string record too short")
+	}
+
+	bv := bk.BiffVersion
+	lenlen := 1
+	if bv >= 30 {
+		lenlen = 2
+	}
+
+	if len(data) < lenlen {
+		return "", fmt.Errorf("string record too short for length")
+	}
+
+	var nchars uint16
+	if lenlen == 1 {
+		nchars = uint16(data[0])
+	} else {
+		nchars = binary.LittleEndian.Uint16(data[0:2])
+	}
+
+	offset := lenlen
+
+	if bv >= 80 {
+		// BIFF 8+: check encoding flag
+		if len(data) <= offset {
+			return "", fmt.Errorf("string record too short for encoding flag")
+		}
+		flag := data[offset] & 1
+		offset++
+
+		if flag == 0 {
+			// Latin-1
+			if len(data) < offset+int(nchars) {
+				return "", fmt.Errorf("string record too short for Latin-1 data")
+			}
+			latin1Bytes := data[offset : offset+int(nchars)]
+			utf8Bytes, err := charmap.ISO8859_1.NewDecoder().Bytes(latin1Bytes)
+			if err != nil {
+				return "", fmt.Errorf("failed to decode Latin-1: %v", err)
+			}
+			return string(utf8Bytes), nil
+		} else {
+			// UTF-16 LE
+			if len(data) < offset+int(nchars)*2 {
+				return "", fmt.Errorf("string record too short for UTF-16 data")
+			}
+			utf16Bytes := data[offset : offset+int(nchars)*2]
+			words := make([]uint16, nchars)
+			for j := 0; j < int(nchars); j++ {
+				words[j] = binary.LittleEndian.Uint16(utf16Bytes[j*2 : (j+1)*2])
+			}
+			return string(utf16.Decode(words)), nil
+		}
+	} else {
+		// BIFF < 8: use workbook encoding
+		enc := bk.Encoding
+		if enc == "" {
+			enc = bk.deriveEncoding()
+		}
+		if len(data) < offset+int(nchars) {
+			return "", fmt.Errorf("string record too short for data")
+		}
+		bytes := data[offset : offset+int(nchars)]
+		return string(bytes), nil // Assume encoding is handled elsewhere
+	}
 }
