@@ -7,11 +7,19 @@ import (
 
 func TestNamesDemo(t *testing.T) {
 	// For now, we just check this doesn't raise an error.
-	// TODO: Implement actual workbook opening
-	_, err := OpenWorkbook(fromSample("namesdemo.xls"), nil)
+	book, err := OpenWorkbook(fromSample("namesdemo.xls"), nil)
 	if err != nil {
-		// Expected to fail until workbook opening is implemented
-		t.Logf("OpenWorkbook(namesdemo.xls) failed (expected): %v", err)
+		t.Fatalf("OpenWorkbook(namesdemo.xls) failed: %v", err)
+	}
+	if book == nil {
+		t.Fatal("OpenWorkbook returned nil book")
+	}
+	// Check that we can get sheet names
+	sheetNames := book.SheetNames()
+	if len(sheetNames) == 0 {
+		t.Log("No sheets found (this is OK if workbook parsing is not fully implemented)")
+	} else {
+		t.Logf("Found %d sheets: %v", len(sheetNames), sheetNames)
 	}
 }
 
