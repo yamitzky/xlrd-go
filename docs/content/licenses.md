@@ -3,6 +3,12 @@ title: "Licenses"
 description: "Licensing terms for xlrd-go."
 ---
 
+xlrd-go is a Go port of the original `xlrd` Python library. The upstream
+licenses still apply to this codebase because large portions are derived from
+that work. New Go-only code follows the same BSD 3-clause terms for
+compatibility, while the older BSD 4-clause text remains for historical
+portions that require it.
+
 ```text
 There are two licenses associated with xlrd. This one relates to the bulk of
 the work done on the library::

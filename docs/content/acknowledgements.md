@@ -4,7 +4,10 @@ description: "Thanks and credits."
 ---
 
 Many thanks to John Machin for originally writing `xlrd` and supporting it for
-many years before retiring.
+many years before retiring. This Go port builds on that work and the original
+community contributions; thank you to everyone who helped make the Python
+version possible.
+Many thanks as well to all contributors of `xlrd` over the years.
 
 - This package started life as a translation from C into Python of parts of a
   utility called "xlreader" developed by David Giffin.
