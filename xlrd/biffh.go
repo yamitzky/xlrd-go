@@ -78,7 +78,7 @@ func BiffTextFromNum(num int) string {
 
 // ErrorTextFromCode returns a text representation of an Excel error code.
 var ErrorTextFromCode = map[byte]string{
-	0x00: "#NULL!", // Intersection of two cell ranges is empty
+	0x00: "#NULL!",  // Intersection of two cell ranges is empty
 	0x07: "#DIV/0!", // Division by zero
 	0x0F: "#VALUE!", // Wrong type of operand
 	0x17: "#REF!",   // Illegal or deleted cell reference
@@ -89,44 +89,44 @@ var ErrorTextFromCode = map[byte]string{
 
 // BIFF record type constants
 const (
-	XL_WORKBOOK_GLOBALS     = 0x5
-	XL_WORKBOOK_GLOBALS_4W  = 0x100
-	XL_WORKSHEET            = 0x10
-	XL_BOUNDSHEET_WORKSHEET = 0x00
-	XL_BOUNDSHEET_CHART     = 0x02
-	XL_BOUNDSHEET_VB_MODULE = 0x06
-	XL_ARRAY                = 0x0221
-	XL_ARRAY2               = 0x0021
-	XL_BLANK                = 0x0201
-	XL_BLANK_B2             = 0x01
-	XL_BOF                  = 0x809
-	XL_BOOLERR              = 0x205
-	XL_BOOLERR_B2           = 0x5
-	XL_BOUNDSHEET           = 0x85
-	XL_BUILTINFMTCOUNT      = 0x56
-	XL_CF                   = 0x01B1
-	XL_CODEPAGE             = 0x42
-	XL_COLINFO              = 0x7D
-	XL_COLUMNDEFAULT        = 0x20 // BIFF2 only
-	XL_COLWIDTH             = 0x24 // BIFF2 only
-	XL_CONDFMT              = 0x01B0
+	XL_WORKBOOK_GLOBALS      = 0x5
+	XL_WORKBOOK_GLOBALS_4W   = 0x100
+	XL_WORKSHEET             = 0x10
+	XL_BOUNDSHEET_WORKSHEET  = 0x00
+	XL_BOUNDSHEET_CHART      = 0x02
+	XL_BOUNDSHEET_VB_MODULE  = 0x06
+	XL_ARRAY                 = 0x0221
+	XL_ARRAY2                = 0x0021
+	XL_BLANK                 = 0x0201
+	XL_BLANK_B2              = 0x01
+	XL_BOF                   = 0x809
+	XL_BOOLERR               = 0x205
+	XL_BOOLERR_B2            = 0x5
+	XL_BOUNDSHEET            = 0x85
+	XL_BUILTINFMTCOUNT       = 0x56
+	XL_CF                    = 0x01B1
+	XL_CODEPAGE              = 0x42
+	XL_COLINFO               = 0x7D
+	XL_COLUMNDEFAULT         = 0x20 // BIFF2 only
+	XL_COLWIDTH              = 0x24 // BIFF2 only
+	XL_CONDFMT               = 0x01B0
 	XL_CONTINUE              = 0x3c
-	XL_COUNTRY              = 0x8C
-	XL_DATEMODE             = 0x22
-	XL_DEFAULTROWHEIGHT     = 0x0225
-	XL_DEFCOLWIDTH          = 0x55
-	XL_DIMENSION            = 0x200
-	XL_DIMENSION2           = 0x0
-	XL_EFONT                = 0x45
-	XL_EOF                  = 0x0a
-	XL_EXTERNNAME           = 0x23
-	XL_EXTERNSHEET          = 0x17
-	XL_EXTSST               = 0xff
-	XL_FEAT11               = 0x872
-	XL_FILEPASS             = 0x2f
-	XL_FONT                 = 0x31
-	XL_FONT_B3B4            = 0x231
-	XL_FORMAT               = 0x41e
+	XL_COUNTRY               = 0x8C
+	XL_DATEMODE              = 0x22
+	XL_DEFAULTROWHEIGHT      = 0x0225
+	XL_DEFCOLWIDTH           = 0x55
+	XL_DIMENSION             = 0x200
+	XL_DIMENSION2            = 0x0
+	XL_EFONT                 = 0x45
+	XL_EOF                   = 0x0a
+	XL_EXTERNNAME            = 0x23
+	XL_EXTERNSHEET           = 0x17
+	XL_EXTSST                = 0xff
+	XL_FEAT11                = 0x872
+	XL_FILEPASS              = 0x2f
+	XL_FONT                  = 0x31
+	XL_FONT_B3B4             = 0x231
+	XL_FORMAT                = 0x41e
 	XL_FORMAT2               = 0x1E // BIFF2, BIFF3
 	XL_FORMULA               = 0x6
 	XL_FORMULA3              = 0x206
@@ -136,7 +136,7 @@ const (
 	XL_QUICKTIP              = 0x0800
 	XL_HORIZONTALPAGEBREAKS  = 0x1b
 	XL_INDEX                 = 0x20b
-	XL_INTEGER               = 0x2 // BIFF2 only
+	XL_INTEGER               = 0x2  // BIFF2 only
 	XL_IXFE                  = 0x44 // BIFF2 only
 	XL_LABEL                 = 0x204
 	XL_LABEL_B2              = 0x04
@@ -149,7 +149,7 @@ const (
 	XL_HEADER                = 0x14
 	XL_FOOTER                = 0x15
 	XL_HCENTER               = 0x83
-	XL_VCENTER                = 0x84
+	XL_VCENTER               = 0x84
 	XL_MERGEDCELLS           = 0xE5
 	XL_MSO_DRAWING           = 0x00EC
 	XL_MSO_DRAWING_GROUP     = 0x00EB
@@ -234,11 +234,11 @@ var SupportedVersions = []int{80, 70, 50, 45, 40, 30, 21, 20}
 var EncodingFromCodepage = map[int]string{
 	1200:  "utf_16_le",
 	10000: "mac_roman",
-	10006: "mac_greek",     // guess
-	10007: "mac_cyrillic",  // guess
-	10029: "mac_latin2",    // guess
-	10079: "mac_iceland",   // guess
-	10081: "mac_turkish",   // guess
+	10006: "mac_greek",    // guess
+	10007: "mac_cyrillic", // guess
+	10029: "mac_latin2",   // guess
+	10079: "mac_iceland",  // guess
+	10081: "mac_turkish",  // guess
 	32768: "mac_roman",
 	32769: "cp1252",
 }
@@ -556,7 +556,7 @@ func HexCharDump(strg []byte, ofs, dlen, base int, fout io.Writer, unnumbered bo
 	pos := ofs
 	numbered := !unnumbered
 	numPrefix := ""
-	
+
 	for pos < endpos {
 		endsub := pos + 16
 		if endsub > endpos {
@@ -564,13 +564,13 @@ func HexCharDump(strg []byte, ofs, dlen, base int, fout io.Writer, unnumbered bo
 		}
 		substrg := strg[pos:endsub]
 		lensub := len(substrg)
-		
+
 		if lensub <= 0 {
 			fmt.Fprintf(fout, "??? hex_char_dump: ofs=%d dlen=%d base=%d -> endpos=%d pos=%d endsub=%d\n",
 				ofs, dlen, base, endpos, pos, endsub)
 			break
 		}
-		
+
 		// Build hex string
 		hexd := ""
 		for i := 0; i < lensub; i++ {
@@ -583,7 +583,7 @@ func HexCharDump(strg []byte, ofs, dlen, base int, fout io.Writer, unnumbered bo
 		for len(hexd) < 48 {
 			hexd += " "
 		}
-		
+
 		// Build character string
 		chard := ""
 		for i := 0; i < lensub; i++ {
@@ -596,13 +596,13 @@ func HexCharDump(strg []byte, ofs, dlen, base int, fout io.Writer, unnumbered bo
 				chard += string(c)
 			}
 		}
-		
+
 		if numbered {
 			numPrefix = fmt.Sprintf("%5d: ", base+pos-ofs)
 		} else {
 			numPrefix = ""
 		}
-		
+
 		fmt.Fprintf(fout, "%s     %-48s %s\n", numPrefix, hexd, chard)
 		pos = endsub
 	}
@@ -769,7 +769,7 @@ func unpack_unicode_update_pos(data []byte, pos int, lenlen int, known_len int) 
 			if pos+nchars > len(data) {
 				return "", pos
 			}
-			str = string(data[pos:pos+nchars])
+			str = string(data[pos : pos+nchars])
 			newpos = pos + nchars
 		}
 
@@ -816,7 +816,7 @@ func unpack_unicode_update_pos(data []byte, pos int, lenlen int, known_len int) 
 			str = string(runes)
 			newpos = pos + 2*nchars
 		} else { // compressed
-			str = string(data[pos:pos+nchars])
+			str = string(data[pos : pos+nchars])
 			newpos = pos + nchars
 		}
 
@@ -874,8 +874,8 @@ type CellRange struct {
 	LastCol  int
 }
 
-// biff_dump dumps BIFF records from binary data.
-func biff_dump(mem []byte, stream_offset, stream_len, base int, fout io.Writer, unnumbered bool) {
+// BiffDump dumps BIFF records from binary data.
+func BiffDump(mem []byte, stream_offset, stream_len, base int, fout io.Writer, unnumbered bool) {
 	pos := stream_offset
 	stream_end := stream_offset + stream_len
 	adj := base - stream_offset
@@ -952,8 +952,8 @@ func biff_dump(mem []byte, stream_offset, stream_len, base int, fout io.Writer, 
 	}
 }
 
-// biff_count_records counts BIFF records in binary data.
-func biff_count_records(mem []byte, stream_offset, stream_len int, fout io.Writer) {
+// BiffCountRecords counts BIFF records in binary data.
+func BiffCountRecords(mem []byte, stream_offset, stream_len int, fout io.Writer) {
 	pos := stream_offset
 	stream_end := stream_offset + stream_len
 	tally := make(map[string]int)
@@ -1015,7 +1015,7 @@ func biff_count_records(mem []byte, stream_offset, stream_len int, fout io.Write
 	for i := 0; i < len(records); i++ {
 		for j := i + 1; j < len(records); j++ {
 			if records[i].count < records[j].count ||
-			   (records[i].count == records[j].count && records[i].name > records[j].name) {
+				(records[i].count == records[j].count && records[i].name > records[j].name) {
 				records[i], records[j] = records[j], records[i]
 			}
 		}
@@ -1023,5 +1023,64 @@ func biff_count_records(mem []byte, stream_offset, stream_len int, fout io.Write
 
 	for _, record := range records {
 		fprintf(fout, "%8d %s\n", record.count, record.name)
+	}
+}
+
+// hex_char_dump dumps hex and character representation of binary data
+func hex_char_dump(data []byte, ofs int, dlen int, base int, fout io.Writer, unnumbered bool) {
+	endpos := ofs + dlen
+	if endpos > len(data) {
+		endpos = len(data)
+	}
+	pos := ofs
+	numbered := !unnumbered
+
+	for pos < endpos {
+		endsub := pos + 16
+		if endsub > endpos {
+			endsub = endpos
+		}
+		substrg := data[pos:endsub]
+		lensub := len(substrg)
+
+		if lensub <= 0 {
+			fmt.Fprintf(fout, "??? hex_char_dump: ofs=%d dlen=%d base=%d -> endpos=%d pos=%d endsub=%d\n",
+				ofs, dlen, base, endpos, pos, endsub)
+			break
+		}
+
+		// Build hex string
+		hexd := ""
+		for i := 0; i < lensub; i++ {
+			if i > 0 {
+				hexd += " "
+			}
+			hexd += fmt.Sprintf("%02x", substrg[i])
+		}
+		// Pad to 48 characters (3 chars per byte: "xx ")
+		for len(hexd) < 48 {
+			hexd += " "
+		}
+
+		// Build character string
+		chard := ""
+		for i := 0; i < lensub; i++ {
+			c := substrg[i]
+			if c == 0 {
+				chard += "~"
+			} else if c < 32 || c > 126 {
+				chard += "?"
+			} else {
+				chard += string(c)
+			}
+		}
+
+		numPrefix := ""
+		if numbered {
+			numPrefix = fmt.Sprintf("%5d: ", base+pos-ofs)
+		}
+
+		fmt.Fprintf(fout, "%s     %-48s %s\n", numPrefix, hexd, chard)
+		pos = endsub
 	}
 }

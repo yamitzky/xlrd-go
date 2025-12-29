@@ -1,58 +1,428 @@
+// Package xlrd provides functionality for reading Excel files
 package xlrd
 
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
+	"os"
+	"reflect"
 	"strings"
 )
 
-// FormulaError represents an error in formula parsing.
-type FormulaError struct {
-	Message string
+
+// assert checks a condition and panics if false
+func assert(condition bool) {
+	if !condition {
+		panic("assertion failed")
+	}
 }
 
-func (e *FormulaError) Error() string {
-	return e.Message
+// unpack unpacks binary data according to format string
+func unpack(format string, data []byte) (interface{}, error) {
+	if strings.HasPrefix(format, "<") {
+		// Little-endian
+		switch format[1:] {
+		case "B":
+			if len(data) < 1 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return uint8(data[0]), nil
+		case "H":
+			if len(data) < 2 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return binary.LittleEndian.Uint16(data), nil
+		case "h":
+			if len(data) < 2 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return int16(binary.LittleEndian.Uint16(data)), nil
+		case "BH":
+			if len(data) < 3 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return []interface{}{uint8(data[0]), binary.LittleEndian.Uint16(data[1:])}, nil
+		case "HH":
+			if len(data) < 4 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return []interface{}{binary.LittleEndian.Uint16(data[:2]), binary.LittleEndian.Uint16(data[2:])}, nil
+		case "hxxxxxxxxhh":
+			if len(data) < 15 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return []interface{}{
+				int16(binary.LittleEndian.Uint16(data[:2])),
+				int16(binary.LittleEndian.Uint16(data[10:12])),
+				int16(binary.LittleEndian.Uint16(data[12:14])),
+			}, nil
+		case "d":
+			if len(data) < 8 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return binary.LittleEndian.Uint64(data), nil
+		case "x2H":
+			if len(data) < 4 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return []interface{}{binary.LittleEndian.Uint16(data[2:4])}, nil
+		case "xHB":
+			if len(data) < 4 {
+				return nil, fmt.Errorf("not enough data")
+			}
+			return []interface{}{binary.LittleEndian.Uint16(data[2:4]), uint8(data[3])}, nil
+		default:
+			return nil, fmt.Errorf("unsupported format: %s", format)
+		}
+	}
+	return nil, fmt.Errorf("unsupported endianness: %s", format)
+}
+
+// copyOperand creates a deep copy of an Operand
+func copyOperand(op *Operand) *Operand {
+	if op == nil {
+		return nil
+	}
+	newOp := &Operand{
+		kind:  op.kind,
+		value: op.value, // shallow copy for now
+		text:  op.text,
+		rpn:   make([]interface{}, len(op.rpn)),
+		_rank: op._rank,
+	}
+	copy(newOp.rpn, op.rpn)
+	return newOp
+}
+
+// evaluateNameFormula evaluates a named formula recursively
+func evaluateNameFormula(bk *Book, tgtobj *Name, tgtnamex int, blah int, level int) {
+	// TODO: Implement name formula evaluation
+	// For now, just mark as evaluated to avoid infinite recursion
+	tgtobj.Evaluated = true
+}
+
+// errorTextFromCode returns error text from error code
+var errorTextFromCode = map[int]string{
+	0x00: "#NULL!",
+	0x07: "#DIV/0!",
+	0x0F: "#VALUE!",
+	0x17: "#REF!",
+	0x1D: "#NAME?",
+	0x24: "#NUM!",
+	0x2A: "#N/A",
+}
+
+// getExternsheetLocalRangeB57 gets external sheet local range for BIFF <= 7
+func getExternsheetLocalRangeB57(bk *Book, rawExtshtx, rawShx1, rawShx2 int, blah int) (int, int) {
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range_b57(%d, %d, %d) -> ???\n",
+			rawExtshtx, rawShx1, rawShx2)
+	}
+	if rawExtshtx >= 0 {
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range_b57(raw_extshtx=%d) -> external\n", rawExtshtx)
+		}
+		return -4, -4 // external reference
+	}
+	refx := -rawExtshtx - 1
+	if refx < 0 || refx >= len(bk.externsheetInfo) {
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "!!! get_externsheet_local_range_b57: refx=%d, not in range(%d)\n",
+				refx, len(bk.externsheetInfo))
+		}
+		return -101, -101
+	}
+	info := bk.externsheetInfo[refx]
+	refRecordx := info[0]
+	refFirstSheetx := info[1]
+	refLastSheetx := info[2]
+	if bk.supbookLocalsInx != nil && refRecordx != *bk.supbookLocalsInx {
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range_b57(refx=%d) -> external\n", refx)
+		}
+		return -4, -4 // external reference
+	}
+	nsheets := len(bk.allSheetsMap)
+	if !(0 <= refFirstSheetx && refFirstSheetx <= refLastSheetx && refLastSheetx < nsheets) {
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range_b57(refx=%d) -> stuffed up\n", refx)
+		}
+		return -102, -102
+	}
+	xlrdSheetx1 := bk.allSheetsMap[refFirstSheetx]
+	xlrdSheetx2 := bk.allSheetsMap[refLastSheetx]
+	if !(0 <= xlrdSheetx1 && xlrdSheetx1 <= xlrdSheetx2) {
+		return -3, -3 // internal reference, but to a macro sheet
+	}
+	return xlrdSheetx1, xlrdSheetx2
+}
+
+// rangename3d generates a range name for 3D reference
+func rangename3d(bk *Book, ref3d *Ref3D) string {
+	if ref3d.shtxlo == ref3d.shtxhi-1 {
+		shname := bk.SheetNames()[ref3d.shtxlo]
+		return fmt.Sprintf("%s!%s", shname, cellrange(ref3d.rlo, ref3d.clo, ref3d.rhi-1, ref3d.chi-1))
+	}
+	shname1 := bk.SheetNames()[ref3d.shtxlo]
+	shname2 := bk.SheetNames()[ref3d.shtxhi-1]
+	return fmt.Sprintf("%s:%s!%s", shname1, shname2, cellrange(ref3d.rlo, ref3d.clo, ref3d.rhi-1, ref3d.chi-1))
+}
+
+// rangename3drel generates a relative range name for 3D reference
+func rangename3drel(bk *Book, ref3d *Ref3D, r1c1 int) string {
+	if ref3d.shtxlo == ref3d.shtxhi-1 {
+		shname := bk.SheetNames()[ref3d.shtxlo]
+		return fmt.Sprintf("%s!%s", shname, cellrange_r1c1(ref3d.rlo, ref3d.clo, ref3d.rhi-1, ref3d.chi-1, ref3d.relflags))
+	}
+	shname1 := bk.SheetNames()[ref3d.shtxlo]
+	shname2 := bk.SheetNames()[ref3d.shtxhi-1]
+	return fmt.Sprintf("%s:%s!%s", shname1, shname2, cellrange_r1c1(ref3d.rlo, ref3d.clo, ref3d.rhi-1, ref3d.chi-1, ref3d.relflags))
+}
+
+// cellrange generates a cell range string
+func cellrange(rlo, clo, rhi, chi int) string {
+	return fmt.Sprintf("%s%d:%s%d", colname(clo), rlo+1, colname(chi), rhi+1)
+}
+
+// cellrange_r1c1 generates a cell range string in R1C1 notation
+func cellrange_r1c1(rlo, clo, rhi, chi int, relflags []int) string {
+	rlo_rel, rhi_rel := relflags[2], relflags[3]
+	clo_rel, chi_rel := relflags[4], relflags[5]
+	return fmt.Sprintf("%s%s:%s%s",
+		cellnameabs(rlo, rlo_rel, 1),
+		colnameabs(clo, clo_rel, 1),
+		cellnameabs(rhi, rhi_rel, 1),
+		colnameabs(chi, chi_rel, 1))
+}
+
+// cellnameabs generates absolute cell name
+func cellnameabs(row, row_rel int, r1c1 int) string {
+	if r1c1 != 0 {
+		if row_rel != 0 {
+			return fmt.Sprintf("R[%d]", row)
+		}
+		return fmt.Sprintf("R%d", row+1)
+	}
+	return fmt.Sprintf("%d", row+1)
+}
+
+// colnameabs generates absolute column name
+func colnameabs(col, col_rel int, r1c1 int) string {
+	if r1c1 != 0 {
+		if col_rel != 0 {
+			return fmt.Sprintf("C[%d]", col)
+		}
+		return fmt.Sprintf("C%d", col+1)
+	}
+	return colname(col)
+}
+
+// colname generates column name from column index
+func colname(col int) string {
+	letters := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	result := ""
+	for col >= 0 {
+		result = string(letters[col%26]) + result
+		col = col/26 - 1
+	}
+	return result
+}
+
+// hexCharDump dumps hex and character representation of data
+func hexCharDump(data []byte, ofs, dlen int, fout *os.File) {
+	endpos := min(ofs+dlen, len(data))
+	pos := ofs
+	for pos < endpos {
+		endsub := min(pos+16, endpos)
+		substr := data[pos:endsub]
+		lensub := endsub - pos
+		if lensub <= 0 {
+			break
+		}
+
+		hexd := ""
+		chard := ""
+		for _, c := range substr {
+			hexd += fmt.Sprintf("%02x ", c)
+			if c == 0 {
+				chard += "~"
+			} else if c >= 32 && c <= 126 {
+				chard += string(c)
+			} else {
+				chard += "?"
+			}
+		}
+
+		// Pad hexd to 48 characters
+		for len(hexd) < 48 {
+			hexd += " "
+		}
+
+		fmt.Fprintf(fout, "%5d:     %-48s %s\n", pos-ofs, hexd, chard)
+		pos = endsub
+	}
+}
+
+// unpackStringUpdatePos unpacks string and updates position
+func unpackStringUpdatePos(data []byte, pos int, encoding string, lenlen int) (string, int) {
+	var strlen int
+	if lenlen == 1 {
+		strlen = int(data[pos])
+		pos++
+	} else {
+		strlen = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+	}
+	strbytes := data[pos : pos+strlen]
+	pos += strlen
+	// For simplicity, assume UTF-8 encoding
+	return string(strbytes), pos
+}
+
+// unpackUnicodeUpdatePos unpacks unicode string and updates position
+func unpackUnicodeUpdatePos(data []byte, pos int, lenlen int) (string, int) {
+	var strlen int
+	if lenlen == 1 {
+		strlen = int(data[pos])
+		pos++
+	} else {
+		strlen = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+	}
+	// Unicode strings in Excel are UTF-16LE
+	strbytes := data[pos : pos+strlen*2]
+	pos += strlen * 2
+
+	// Convert UTF-16LE to string
+	utf16 := make([]uint16, strlen)
+	for i := 0; i < strlen; i++ {
+		utf16[i] = binary.LittleEndian.Uint16(strbytes[i*2 : i*2+2])
+	}
+
+	runes := make([]rune, 0, strlen)
+	for _, r := range utf16 {
+		runes = append(runes, rune(r))
+	}
+	return string(runes), pos
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Formula type constants
 const (
-	FMLA_TYPE_CELL     = 1
-	FMLA_TYPE_SHARED   = 2
-	FMLA_TYPE_ARRAY    = 4
-	FMLA_TYPE_COND_FMT = 8
-	FMLA_TYPE_DATA_VAL = 16
-	FMLA_TYPE_NAME     = 32
-	ALL_FMLA_TYPES     = 63
+	FmlaTypeCell    = 1
+	FmlaTypeShared  = 2
+	FmlaTypeArray   = 4
+	FmlaTypeCondFmt = 8
+	FmlaTypeDataVal = 16
+	FmlaTypeName    = 32
+	AllFmlaTypes    = 63
 )
 
-// Operand type constants
+// List separator
+const listsep = ","
+
+// Stack levels
 const (
-	oBOOL = 3
-	oERR  = 4
-	oNUM  = 2
-	oREF  = -1
-	oREL  = -2
-	oSTRG = 1
-	oUNK  = 0
-	oMSNG = 5 // tMissArg
+	LeafRank        = 90
+	FuncRank        = 90
+	StackAlarmLevel = 5
+	StackPanicLevel = 10
 )
 
-// OkindDict maps operand types to their string representations.
-var OkindDict = map[int]string{
-	-2: "oREL",
-	-1: "oREF",
-	0:  "oUNK",
-	1:  "oSTRG",
-	2:  "oNUM",
-	3:  "oBOOL",
-	4:  "oERR",
-	5:  "oMSNG",
+// Error opcodes
+var errorOpcodes = map[int]bool{
+	0x07: true,
+	0x08: true,
+	0x0A: true,
+	0x0B: true,
+	0x1C: true,
+	0x1D: true,
+	0x2F: true,
 }
 
-// FmlaTypeDescrMap maps formula types to their string descriptions.
-var FmlaTypeDescrMap = map[int]string{
+// tAttrNames maps subopcodes for tAttr
+var tAttrNames = map[int]string{
+	0x00: "Skip??", // seen in SAMPLES.XLS which shipped with Excel 5.0
+	0x01: "Volatile",
+	0x02: "If",
+	0x04: "Choose",
+	0x08: "Skip",
+	0x10: "Sum",
+	0x20: "Assign",
+	0x40: "Space",
+	0x41: "SpaceVolatile",
+}
+
+// Box functions for range operations
+var tRangeFuncs = []func(int, int) int{
+	func(a, b int) int { return min(a, b) },
+	func(a, b int) int { return max(a, b) },
+	func(a, b int) int { return min(a, b) },
+	func(a, b int) int { return max(a, b) },
+	func(a, b int) int { return min(a, b) },
+	func(a, b int) int { return max(a, b) },
+}
+var tIsectFuncs = []func(int, int) int{
+	func(a, b int) int { return max(a, b) },
+	func(a, b int) int { return min(a, b) },
+	func(a, b int) int { return max(a, b) },
+	func(a, b int) int { return min(a, b) },
+	func(a, b int) int { return max(a, b) },
+	func(a, b int) int { return min(a, b) },
+}
+
+// Token not allowed
+var tokenNotAllowed = map[int]bool{
+	0x01: true, 0x02: true, 0x03: true, 0x10: true, 0x11: true, 0x12: true, 0x13: true,
+	0x14: true, 0x15: true, 0x16: true, 0x17: true, 0x18: true, 0x19: true, 0x1A: true,
+	0x1B: true, 0x1C: true, 0x1D: true, 0x1E: true, 0x1F: true,
+}
+
+// Operator kind dictionary
+var OkindDict = map[int]int{
+	0x01: 1, 0x02: 1, 0x03: 1, 0x04: 1, 0x05: 1, 0x06: 1, 0x07: 1, 0x08: 1,
+	0x09: 1, 0x0A: 1, 0x0B: 1, 0x0C: 1, 0x0D: 1, 0x0E: 1, 0x0F: 1, 0x10: 1,
+	0x11: 1, 0x12: 1, 0x13: 1, 0x14: 1, 0x15: 1, 0x16: 1, 0x17: 1, 0x18: 1,
+	0x19: 1, 0x1A: 1, 0x1B: 1, 0x1C: 1, 0x1D: 1, 0x1E: 1, 0x1F: 1,
+}
+
+// Size tables
+var sztab0 = []int{-2, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, 8, 4, 2, 2, 3, 9, 8, 2, 3, 8, 4, 7, 5, 5, 5, 2, 4, 7, 4, 7, 2, 2, -2, -2, -2, -2, -2, -2, -2, -2, 3, -2, -2, -2, -2, -2, -2, -2}
+var sztab1 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, 11, 5, 2, 2, 3, 9, 9, 2, 3, 11, 4, 7, 7, 7, 7, 3, 4, 7, 4, 7, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, 3, -2, -2, -2, -2, -2, -2, -2}
+var sztab2 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, 11, 5, 2, 2, 3, 9, 9, 3, 4, 11, 4, 7, 7, 7, 7, 3, 4, 7, 4, 7, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2}
+var sztab3 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, -2, -2, 2, 2, 3, 9, 9, 3, 4, 15, 4, 7, 7, 7, 7, 3, 4, 7, 4, 7, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, -2, 25, 18, 21, 18, 21, -2, -2}
+var sztab4 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -2, -2, 2, 2, 3, 9, 9, 3, 4, 5, 5, 9, 7, 7, 7, 3, 5, 9, 5, 9, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, -2, 7, 7, 11, 7, 11, -2, -2}
+
+// Size dictionary
+var szdict = map[int][]int{
+	20: sztab0,
+	21: sztab0,
+	30: sztab1,
+	40: sztab2,
+	45: sztab2,
+	50: sztab3,
+	70: sztab3,
+	80: sztab4,
+}
+
+// Operation names
+var onames = []string{
+	"Unk00", "Exp", "Tbl", "Add", "Sub", "Mul", "Div", "Power", "Concat", "LT", "LE", "EQ", "GE", "GT", "NE",
+	"Isect", "List", "Range", "Uplus", "Uminus", "Percent", "Paren", "MissArg", "Str", "Extended", "Attr",
+	"Sheet", "EndSheet", "Err", "Bool", "Int", "Num", "Array", "Func", "FuncVar", "Name", "Ref", "Area",
+	"MemArea", "MemErr", "MemNoMem", "MemFunc", "RefErr", "AreaErr", "RefN", "AreaN", "MemAreaN", "MemNoMemN",
+	"", "", "", "", "", "", "", "", "FuncCE", "NameX", "Ref3d", "Area3d", "RefErr3d", "AreaErr3d", "", "",
+}
+
+// Formula type description map
+var fmlaTypeDescrMap = map[int]string{
 	1:  "CELL",
 	2:  "SHARED",
 	4:  "ARRAY",
@@ -61,205 +431,122 @@ var FmlaTypeDescrMap = map[int]string{
 	32: "NAME",
 }
 
-// TokenNotAllowed is a function that returns forbidden formula types for a token.
-var TokenNotAllowed = map[int]int{
-	0x01: ALL_FMLA_TYPES - FMLA_TYPE_CELL,                            // tExp
-	0x02: ALL_FMLA_TYPES - FMLA_TYPE_CELL,                            // tTbl
-	0x0F: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tIsect
-	0x10: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tUnion/List
-	0x11: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tRange
-	0x20: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tArray
-	0x23: FMLA_TYPE_SHARED,                                           // tName
-	0x39: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tNameX
-	0x3A: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tRef3d
-	0x3B: FMLA_TYPE_SHARED + FMLA_TYPE_COND_FMT + FMLA_TYPE_DATA_VAL, // tArea3d
-	0x2C: FMLA_TYPE_CELL + FMLA_TYPE_ARRAY,                           // tRefN
-	0x2D: FMLA_TYPE_CELL + FMLA_TYPE_ARRAY,                           // tAreaN
+// Function definition structure
+type funcDef struct {
+	name      string
+	minArgs   int
+	maxArgs   int
+	flags     int
+	knownArgs int
+	retType   string
+	args      string
 }
 
-// Formula evaluation constants
+// Function definitions
+var funcDefs = map[int]funcDef{
+	0: {"COUNT", 0, 30, 0x04, 1, "V", "R"},
+	1: {"IF", 2, 3, 0x04, 3, "V", "VRR"},
+	2: {"ISNA", 1, 1, 0x02, 1, "V", "V"},
+	3: {"ISERROR", 1, 1, 0x02, 1, "V", "V"},
+	4: {"SUM", 0, 30, 0x04, 1, "V", "R"},
+	5: {"AVERAGE", 1, 30, 0x04, 1, "V", "R"},
+	6: {"MIN", 1, 30, 0x04, 1, "V", "R"},
+	7: {"MAX", 1, 30, 0x04, 1, "V", "R"},
+	8: {"ROW", 0, 1, 0x04, 1, "V", "R"},
+}
+
+// Arithmetic argument dictionary
+var arithArgdict = map[int]interface{}{
+	oNUM:  nop,
+	oSTRG: func(x interface{}) interface{} { return x.(float64) },
+}
+
+// Comparison argument dictionary
+var cmpArgdict = map[int]interface{}{
+	oNUM:  nop,
+	oSTRG: nop,
+}
+
+// String argument dictionary
+var strgArgdict = map[int]interface{}{
+	oNUM:  num2strg,
+	oSTRG: nop,
+}
+
+// Binary operation rules structure
+type binopRule struct {
+	argdict    map[int]interface{}
+	resultType int
+	op         interface{}
+	priority   int
+	symbol     string
+}
+
+// Binary operation rules
+var binopRules = map[int]binopRule{
+	tAdd:    {arithArgdict, oNUM, opr.add, 30, "+"},
+	tSub:    {arithArgdict, oNUM, opr.sub, 30, "-"},
+	tMul:    {arithArgdict, oNUM, opr.mul, 40, "*"},
+	tDiv:    {arithArgdict, oNUM, opr.truediv, 40, "/"},
+	tPower:  {arithArgdict, oNUM, oprPow, 50, "^"},
+	tConcat: {strgArgdict, oSTRG, opr.add, 20, "&"},
+	tLT:     {cmpArgdict, oBOOL, oprLt, 10, "<"},
+	tLE:     {cmpArgdict, oBOOL, oprLe, 10, "<="},
+	tEQ:     {cmpArgdict, oBOOL, oprEq, 10, "="},
+	tGE:     {cmpArgdict, oBOOL, oprGe, 10, ">="},
+	tGT:     {cmpArgdict, oBOOL, oprGt, 10, ">"},
+	tNE:     {cmpArgdict, oBOOL, oprNe, 10, "<>"},
+}
+
+// Unary operation rules structure
+type unopRule struct {
+	op       interface{}
+	priority int
+	prefix   string
+	suffix   string
+}
+
+// Unary operation rules
+var unopRules = map[int]unopRule{
+	0x13: {func(x interface{}) interface{} { return -x.(float64) }, 70, "-", ""},        // unary minus
+	0x12: {nop, 70, "+", ""},                                                            // unary plus
+	0x14: {func(x interface{}) interface{} { return x.(float64) / 100.0 }, 60, "", "%"}, // percent
+}
+
+// Operand types
 const (
-	LEAF_RANK         = 90
-	FUNC_RANK         = 90
-	STACK_ALARM_LEVEL = 5
-	STACK_PANIC_LEVEL = 10
+	oUNK  = 0
+	oSTRG = 1
+	oNUM  = 2
+	oBOOL = 3
+	oERR  = 4
+	oMSNG = 5 // tMissArg
+	oREF  = -1
+	oREL  = -2
 )
 
-// Operand represents an operand used in evaluating formulas.
-// The kind field determines how the value is represented:
-//   - oBOOL (3): integer where 0 => False, 1 => True
-//   - oERR (4): None or an int error code
-//   - oMSNG (5): placeholder for missing function argument, value is nil
-//   - oNUM (2): a float value
-//   - oREF (-1): nil or a non-empty slice of absolute Ref3D instances
-//   - oREL (-2): nil or a non-empty slice of relative Ref3D instances
-//   - oSTRG (1): a string value
-//   - oUNK (0): unknown or ambiguous kind, value is nil
-type Operand struct {
-	// Value represents the actual value of the operand.
-	// nil means the value is a variable (depends on cell data), not a constant.
-	Value interface{}
+// Exported operand type aliases (match Python __all__ names).
+const (
+	OUNK  = oUNK
+	OSTRG = oSTRG
+	ONUM  = oNUM
+	OBOOL = oBOOL
+	OERR  = oERR
+	OREF  = oREF
+	OREL  = oREL
+)
 
-	// Kind indicates the type of operand (oUNK means unknown/ambiguous).
-	Kind int
+// Formula type constants (match Python __all__ names).
+const (
+	FMLA_TYPE_CELL     = 1
+	FMLA_TYPE_SHARED   = 2
+	FMLA_TYPE_ARRAY    = 4
+	FMLA_TYPE_COND_FMT = 8
+	FMLA_TYPE_DATA_VAL = 16
+	FMLA_TYPE_NAME     = 32
+)
 
-	// Rank is an internal operator precedence value used in reconstructing formula text.
-	Rank int
-
-	// Text is the reconstituted text of the original formula.
-	Text string
-}
-
-// NewOperand creates a new Operand with the specified parameters.
-func NewOperand(akind int, avalue interface{}, arank int, atext string) *Operand {
-	if atext == "" {
-		atext = "?"
-	}
-	return &Operand{
-		Kind:  akind,
-		Value: avalue,
-		Rank:  arank,
-		Text:  atext,
-	}
-}
-
-// String returns a string representation of the Operand.
-func (o *Operand) String() string {
-	kindText := OkindDict[o.Kind]
-	if kindText == "" {
-		kindText = "?Unknown kind?"
-	}
-	return fmt.Sprintf("Operand(kind=%s, value=%v, text=%s)", kindText, o.Value, o.Text)
-}
-
-// Ref3D represents an absolute or relative 3-dimensional reference to a box of one or more cells.
-// The coords field is a slice of the form: [shtxlo, shtxhi, rowxlo, rowxhi, colxlo, colxhi]
-// where 0 <= thingxlo <= thingx < thingxhi.
-//
-// The relflags field is a slice of 6 flags indicating whether the corresponding
-// (sheet|row|col)(lo|hi) is relative (1) or absolute (0).
-//
-// Individual coordinates are also available as separate fields for convenience.
-type Ref3D struct {
-	// Coords contains [shtxlo, shtxhi, rowxlo, rowxhi, colxlo, colxhi]
-	Coords [6]int
-
-	// RelFlags contains 6 flags for relative/absolute components
-	RelFlags [6]int
-
-	// Individual coordinate fields for convenience
-	ShtXLo, ShtXHi int
-	RowXLo, RowXHi int
-	ColXLo, ColXHi int
-}
-
-// NewRef3D creates a new Ref3D from a slice of integers.
-// The slice should contain at least 6 elements for coords, and optionally 6 more for relflags.
-func NewRef3D(atuple []int) *Ref3D {
-	ref3d := &Ref3D{}
-
-	// Set coords (first 6 elements)
-	copy(ref3d.Coords[:], atuple[:6])
-
-	// Set relflags (next 6 elements, or default to absolute)
-	if len(atuple) >= 12 {
-		copy(ref3d.RelFlags[:], atuple[6:12])
-	} else {
-		// Default to absolute (all zeros)
-		ref3d.RelFlags = [6]int{0, 0, 0, 0, 0, 0}
-	}
-
-	// Set individual fields for convenience
-	ref3d.ShtXLo = ref3d.Coords[0]
-	ref3d.ShtXHi = ref3d.Coords[1]
-	ref3d.RowXLo = ref3d.Coords[2]
-	ref3d.RowXHi = ref3d.Coords[3]
-	ref3d.ColXLo = ref3d.Coords[4]
-	ref3d.ColXHi = ref3d.Coords[5]
-
-	return ref3d
-}
-
-// String returns a string representation of the Ref3D.
-func (r *Ref3D) String() string {
-	if r.RelFlags == [6]int{0, 0, 0, 0, 0, 0} {
-		return fmt.Sprintf("Ref3D(coords=%v)", r.Coords)
-	}
-	return fmt.Sprintf("Ref3D(coords=%v, relflags=%v)", r.Coords, r.RelFlags)
-}
-
-// RowNameRel returns a relative row name.
-// If no base rowx is provided, returns R1C1 format.
-func RowNameRel(rowx, rowxrel int, browx *int, r1c1 bool) string {
-	// If no base rowx is provided, we have to return r1c1
-	if browx == nil {
-		r1c1 = true
-	}
-	if rowxrel == 0 {
-		if r1c1 {
-			return fmt.Sprintf("R%d", rowx+1)
-		}
-		return fmt.Sprintf("$%d", rowx+1)
-	}
-	if r1c1 {
-		if rowx != 0 {
-			return fmt.Sprintf("R[%d]", rowx)
-		}
-		return "R"
-	}
-	return fmt.Sprintf("%d", (*browx+rowx)%65536+1)
-}
-
-// ColNameRel returns a relative column name.
-// If no base colx is provided, returns R1C1 format.
-func ColNameRel(colx, colxrel int, bcolx *int, r1c1 bool) string {
-	// If no base colx is provided, we have to return r1c1
-	if bcolx == nil {
-		r1c1 = true
-	}
-	if colxrel == 0 {
-		if r1c1 {
-			return fmt.Sprintf("C%d", colx+1)
-		}
-		return "$" + colname(colx)
-	}
-	if r1c1 {
-		if colx != 0 {
-			return fmt.Sprintf("C[%d]", colx)
-		}
-		return "C"
-	}
-	return colname((*bcolx + colx) % 256)
-}
-
-// CellNameRel returns a relative cell name.
-func CellNameRel(rowx, colx, rowxrel, colxrel int, browx, bcolx *int, r1c1 bool) string {
-	if rowxrel == 0 && colxrel == 0 {
-		return CellNameAbs(rowx, colx, r1c1)
-	}
-	if (rowxrel != 0 && browx == nil) || (colxrel != 0 && bcolx == nil) {
-		// must flip the whole cell into R1C1 mode
-		r1c1 = true
-	}
-	c := ColNameRel(colx, colxrel, bcolx, r1c1)
-	r := RowNameRel(rowx, rowxrel, browx, r1c1)
-	if r1c1 {
-		return r + c
-	}
-	return c + r
-}
-
-// RangeName2DRel returns a relative 2D range name.
-func RangeName2DRel(rloRhiCloChi []int, relFlags []int, browx, bcolx *int, r1c1 bool) string {
-	rlo, rhi, clo, chi := rloRhiCloChi[0], rloRhiCloChi[1], rloRhiCloChi[2], rloRhiCloChi[3]
-	rlorel, rhirel, clorel, chirel := relFlags[0], relFlags[1], relFlags[2], relFlags[3]
-
-	topleft := CellNameRel(rlo, clo, rlorel, clorel, browx, bcolx, r1c1)
-	botright := CellNameRel(rhi-1, chi-1, rhirel, chirel, browx, bcolx, r1c1)
-	return fmt.Sprintf("%s:%s", topleft, botright)
-}
-
-// Binary operation token constants
+// Token types
 const (
 	tAdd    = 0x03
 	tSub    = 0x04
@@ -275,228 +562,227 @@ const (
 	tNE     = 0x0E
 )
 
-// Nop returns the input value unchanged.
-func Nop(x interface{}) interface{} {
+// Operator functions (equivalent to Python's operator module)
+type oprType struct{}
+
+var opr oprType
+
+func (o oprType) add(a, b interface{}) interface{} {
+	switch a.(type) {
+	case float64:
+		switch b.(type) {
+		case float64:
+			return a.(float64) + b.(float64)
+		case string:
+			return fmt.Sprintf("%v%v", a, b)
+		}
+	case string:
+		return fmt.Sprintf("%v%v", a, b)
+	}
+	return nil
+}
+
+func (o oprType) sub(a, b interface{}) interface{} {
+	if af, aok := a.(float64); aok {
+		if bf, bok := b.(float64); bok {
+			return af - bf
+		}
+	}
+	return nil
+}
+
+func (o oprType) mul(a, b interface{}) interface{} {
+	if af, aok := a.(float64); aok {
+		if bf, bok := b.(float64); bok {
+			return af * bf
+		}
+	}
+	return nil
+}
+
+func (o oprType) truediv(a, b interface{}) interface{} {
+	if af, aok := a.(float64); aok {
+		if bf, bok := b.(float64); bok && bf != 0 {
+			return af / bf
+		}
+	}
+	return nil
+}
+
+// Comparison operators
+func oprLt(a, b interface{}) interface{} { return a.(float64) < b.(float64) }
+func oprLe(a, b interface{}) interface{} { return a.(float64) <= b.(float64) }
+func oprEq(a, b interface{}) interface{} { return a.(float64) == b.(float64) }
+func oprGe(a, b interface{}) interface{} { return a.(float64) >= b.(float64) }
+func oprGt(a, b interface{}) interface{} { return a.(float64) > b.(float64) }
+func oprNe(a, b interface{}) interface{} { return a.(float64) != b.(float64) }
+
+// Power operator
+func oprPow(a, b interface{}) interface{} {
+	// Simple power implementation
+	result := 1.0
+	base := a.(float64)
+	exp := int(b.(float64))
+	for i := 0; i < exp; i++ {
+		result *= base
+	}
+	return result
+}
+
+// ===== TOP LEVEL FUNCTIONS =====
+
+
+// adjustCellAddrBiff8 function
+
+// adjustCellAddrBiffLe7 function
+
+// getCellAddr function
+
+// getCellRangeAddr function
+
+// getExternsheetLocalRange function
+
+// getExternsheetLocalRangeB57 function
+
+// nop function
+func nop(x interface{}) interface{} {
 	return x
 }
 
-// OprPow returns x raised to the power of y.
-func OprPow(x, y float64) float64 {
-	return math.Pow(x, y)
-}
-
-// OprLt returns true if x < y.
-func OprLt(x, y interface{}) bool {
-	switch xv := x.(type) {
-	case float64:
-		switch yv := y.(type) {
-		case float64:
-			return xv < yv
-		case string:
-			return false // In Excel, numbers are "less than" strings
-		}
-	case string:
-		switch yv := y.(type) {
-		case float64:
-			return true // In Excel, strings are "greater than" numbers
-		case string:
-			return xv < yv
-		}
-	}
-	return false
-}
-
-// OprLe returns true if x <= y.
-func OprLe(x, y interface{}) bool {
-	switch xv := x.(type) {
-	case float64:
-		switch yv := y.(type) {
-		case float64:
-			return xv <= yv
-		case string:
-			return false
-		}
-	case string:
-		switch yv := y.(type) {
-		case float64:
-			return true
-		case string:
-			return xv <= yv
-		}
-	}
-	return false
-}
-
-// OprEq returns true if x == y.
-func OprEq(x, y interface{}) bool {
-	switch xv := x.(type) {
-	case float64:
-		switch yv := y.(type) {
-		case float64:
-			return xv == yv
-		case string:
-			return false
-		}
-	case string:
-		switch yv := y.(type) {
-		case float64:
-			return false
-		case string:
-			return xv == yv
-		}
-	}
-	return false
-}
-
-// OprGe returns true if x >= y.
-func OprGe(x, y interface{}) bool {
-	switch xv := x.(type) {
-	case float64:
-		switch yv := y.(type) {
-		case float64:
-			return xv >= yv
-		case string:
-			return true
-		}
-	case string:
-		switch yv := y.(type) {
-		case float64:
-			return false
-		case string:
-			return xv >= yv
-		}
-	}
-	return false
-}
-
-// OprGt returns true if x > y.
-func OprGt(x, y interface{}) bool {
-	switch xv := x.(type) {
-	case float64:
-		switch yv := y.(type) {
-		case float64:
-			return xv > yv
-		case string:
-			return true
-		}
-	case string:
-		switch yv := y.(type) {
-		case float64:
-			return false
-		case string:
-			return xv > yv
-		}
-	}
-	return false
-}
-
-// OprNe returns true if x != y.
-func OprNe(x, y interface{}) bool {
-	return !OprEq(x, y)
-}
-
-// Num2Str converts a number to string, emulating Excel's default conversion.
-func Num2Str(num float64) string {
-	s := fmt.Sprintf("%g", num)
+// num2strg function - Attempt to emulate Excel's default conversion from number to string
+func num2strg(num interface{}) string {
+	s := fmt.Sprintf("%v", num)
 	if strings.HasSuffix(s, ".0") {
 		s = s[:len(s)-2]
 	}
 	return s
 }
 
-// nop returns the input value unchanged.
-func nop(x interface{}) interface{} {
-	return x
-}
-
-// AdjustCellAddrBiff8 adjusts cell address for BIFF8 format.
-func AdjustCellAddrBiff8(rowval, colval int, reldelta bool, browx, bcolx *int) (int, int, int, int) {
-	rowRel := (colval >> 15) & 1
-	colRel := (colval >> 14) & 1
-	rowx := rowval
-	colx := colval & 0xff
-
-	if reldelta {
-		if rowRel != 0 && rowx >= 32768 {
-			rowx -= 65536
-		}
-		if colRel != 0 && colx >= 128 {
-			colx -= 256
-		}
-	} else {
-		if rowRel != 0 && browx != nil {
-			rowx -= *browx
-		}
-		if colRel != 0 && bcolx != nil {
-			colx -= *bcolx
-		}
+// rownamerel function
+func rownamerel(rowx int, rowxrel int, browx *int, r1c1 int) string {
+	// if no base rowx is provided, we have to return r1c1
+	if browx == nil {
+		r1c1 = 1
 	}
-	return rowx, colx, rowRel, colRel
-}
-
-// AdjustCellAddrBiffLe7 adjusts cell address for BIFF <= 7 format.
-func AdjustCellAddrBiffLe7(rowval, colval int, reldelta bool, browx, bcolx *int) (int, int, int, int) {
-	rowRel := (rowval >> 15) & 1
-	colRel := (rowval >> 14) & 1
-	rowx := rowval & 0x3fff
-	colx := colval
-
-	if reldelta {
-		if rowRel != 0 && rowx >= 8192 {
-			rowx -= 16384
+	if rowxrel == 0 {
+		if r1c1 != 0 {
+			return fmt.Sprintf("R%d", rowx+1)
 		}
-		if colRel != 0 && colx >= 128 {
-			colx -= 256
-		}
-	} else {
-		if rowRel != 0 && browx != nil {
-			rowx -= *browx
-		}
-		if colRel != 0 && bcolx != nil {
-			colx -= *bcolx
-		}
+		return fmt.Sprintf("$%d", rowx+1)
 	}
-	return rowx, colx, rowRel, colRel
-}
-
-// GetCellAddr extracts cell address from binary data.
-func GetCellAddr(data []byte, pos int, bv int, reldelta bool, browx, bcolx *int) (int, int, int, int) {
-	if bv >= 80 {
-		rowval := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		colval := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
-		return AdjustCellAddrBiff8(rowval, colval, reldelta, browx, bcolx)
-	} else {
-		rowval := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		colval := int(data[pos+2])
-		return AdjustCellAddrBiffLe7(rowval, colval, reldelta, browx, bcolx)
+	if r1c1 != 0 {
+		if rowx != 0 {
+			return fmt.Sprintf("R[%d]", rowx)
+		}
+		return "R"
 	}
+	return fmt.Sprintf("%d", (*browx+rowx)%65536+1)
 }
 
-// GetCellRangeAddr extracts cell range address from binary data.
-func GetCellRangeAddr(data []byte, pos int, bv int, reldelta bool, browx, bcolx *int) ([4]int, [4]int) {
-	if bv >= 80 {
-		row1val := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		row2val := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
-		col1val := int(binary.LittleEndian.Uint16(data[pos+4 : pos+6]))
-		col2val := int(binary.LittleEndian.Uint16(data[pos+6 : pos+8]))
-
-		r1, c1, rr1, cr1 := AdjustCellAddrBiff8(row1val, col1val, reldelta, browx, bcolx)
-		r2, c2, rr2, cr2 := AdjustCellAddrBiff8(row2val, col2val, reldelta, browx, bcolx)
-		return [4]int{r1, c1, rr1, cr1}, [4]int{r2, c2, rr2, cr2}
-	} else {
-		row1val := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
-		row2val := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
-		col1val := int(data[pos+4])
-		col2val := int(data[pos+5])
-
-		r1, c1, rr1, cr1 := AdjustCellAddrBiffLe7(row1val, col1val, reldelta, browx, bcolx)
-		r2, c2, rr2, cr2 := AdjustCellAddrBiffLe7(row2val, col2val, reldelta, browx, bcolx)
-		return [4]int{r1, c1, rr1, cr1}, [4]int{r2, c2, rr2, cr2}
+// colnamerel function
+func colnamerel(colx int, colxrel int, bcolx *int, r1c1 int) string {
+	// if no base colx is provided, we have to return r1c1
+	if bcolx == nil {
+		r1c1 = 1
 	}
+	if colxrel == 0 {
+		if r1c1 != 0 {
+			return fmt.Sprintf("C%d", colx+1)
+		}
+		return "$" + colname(colx)
+	}
+	if r1c1 != 0 {
+		if colx != 0 {
+			return fmt.Sprintf("C[%d]", colx)
+		}
+		return "C"
+	}
+	return colname((*bcolx + colx) % 256)
 }
 
-// QuotedSheetName returns a quoted sheet name if necessary.
-func QuotedSheetName(shnames []string, shx int) string {
+// Cellname function - Utility function: (5, 7) => 'H6'
+func Cellname(rowx int, colx int) string {
+	return fmt.Sprintf("%s%d", colname(colx), rowx+1)
+}
+
+// Cellnameabs function - Utility function: (5, 7) => '$H$6'
+func Cellnameabs(rowx int, colx int, r1c1 int) string {
+	if r1c1 != 0 {
+		return fmt.Sprintf("R%dC%d", rowx+1, colx+1)
+	}
+	return fmt.Sprintf("$%s$%d", colname(colx), rowx+1)
+}
+
+// cellnamerel function
+func cellnamerel(rowx int, colx int, rowxrel int, colxrel int, browx *int, bcolx *int, r1c1 int) string {
+	if rowxrel == 0 && colxrel == 0 {
+		return cellnameabs(rowx, colx, r1c1)
+	}
+	if (rowxrel != 0 && browx == nil) || (colxrel != 0 && bcolx == nil) {
+		// must flip the whole cell into R1C1 mode
+		r1c1 = 1
+	}
+	c := colnamerel(colx, colxrel, bcolx, r1c1)
+	r := rownamerel(rowx, rowxrel, browx, r1c1)
+	if r1c1 != 0 {
+		return r + c
+	}
+	return c + r
+}
+
+// Colname function - Utility function: 7 => 'H', 27 => 'AB'
+
+// rangename2d function
+func rangename2d(rlo int, rhi int, clo int, chi int, r1c1 int) string {
+	if r1c1 != 0 {
+		return ""
+	}
+	if rhi == rlo+1 && chi == clo+1 {
+		return cellnameabs(rlo, clo, r1c1)
+	}
+	return fmt.Sprintf("%s:%s", cellnameabs(rlo, clo, r1c1), cellnameabs(rhi-1, chi-1, r1c1))
+}
+
+// rangename2drel function
+func rangename2drel(rloRhiCloChi []int, rlorelRhirelClorelChirel []int, browx *int, bcolx *int, r1c1 int) string {
+	rlo, rhi, clo, chi := rloRhiCloChi[0], rloRhiCloChi[1], rloRhiCloChi[2], rloRhiCloChi[3]
+	rlorel, rhirel, clorel, chirel := rlorelRhirelClorelChirel[0], rlorelRhirelClorelChirel[1], rlorelRhirelClorelChirel[2], rlorelRhirelClorelChirel[3]
+	if (rlorel != 0 || rhirel != 0) && browx == nil {
+		r1c1 = 1
+	}
+	if (clorel != 0 || chirel != 0) && bcolx == nil {
+		r1c1 = 1
+	}
+	return fmt.Sprintf("%s:%s",
+		cellnamerel(rlo, clo, rlorel, clorel, browx, bcolx, r1c1),
+		cellnamerel(rhi-1, chi-1, rhirel, chirel, browx, bcolx, r1c1),
+	)
+}
+
+// Rangename3d function
+func Rangename3d(book interface{}, ref3d interface{}) string {
+	r3d := ref3d.(*Ref3D)
+	coords := r3d.coords
+	return fmt.Sprintf("%s!%s",
+		sheetrange(book, coords[0], coords[1]),
+		rangename2d(coords[2], coords[3], coords[4], coords[5], 0))
+}
+
+// Rangename3drel function
+func Rangename3drel(book interface{}, ref3d interface{}, browx *int, bcolx *int, r1c1 int) string {
+	r3d := ref3d.(*Ref3D)
+	coords := r3d.coords
+	relflags := r3d.relflags
+	shdesc := sheetrangerel(book, coords[:2], relflags[:2])
+	rngdesc := rangename2drel(coords[2:6], relflags[2:6], browx, bcolx, r1c1)
+	if shdesc == "" {
+		return rngdesc
+	}
+	return fmt.Sprintf("%s!%s", shdesc, rngdesc)
+}
+
+// quotedsheetname function
+func quotedsheetname(shnames []string, shx int) string {
 	var shname string
 	if shx >= 0 {
 		shname = shnames[shx]
@@ -514,7 +800,6 @@ func QuotedSheetName(shnames []string, shx int) string {
 			shname = fmt.Sprintf("?error %d?", shx)
 		}
 	}
-
 	if strings.Contains(shname, "'") {
 		return "'" + strings.ReplaceAll(shname, "'", "''") + "'"
 	}
@@ -524,880 +809,678 @@ func QuotedSheetName(shnames []string, shx int) string {
 	return shname
 }
 
-// SheetRange returns a sheet range description.
-func SheetRange(book *Book, slo, shi int) string {
-	shnames := book.SheetNames()
-	shdesc := QuotedSheetName(shnames, slo)
+// sheetrange function
+func sheetrange(book interface{}, slo int, shi int) string {
+	bk := book.(*Book)
+	shnames := bk.sheetNames
+	shdesc := quotedsheetname(shnames, slo)
 	if slo != shi-1 {
-		shdesc += ":" + QuotedSheetName(shnames, shi-1)
+		shdesc += ":" + quotedsheetname(shnames, shi-1)
 	}
 	return shdesc
 }
 
-// SheetRangeRel returns a relative sheet range description.
-func SheetRangeRel(book *Book, srange []int, srangerel []int) string {
-	slo, shi := srange[0], srange[1]
-	slorel, shirel := srangerel[0], srangerel[1]
-
+// sheetrangerel function
+func sheetrangerel(book interface{}, srange interface{}, srangerel interface{}) string {
+	sr := srange.([]int)
+	srr := srangerel.([]int)
+	slo, shi := sr[0], sr[1]
+	slorel, shirel := srr[0], srr[1]
 	if slorel == 0 && shirel == 0 {
-		return SheetRange(book, slo, shi)
+		return sheetrange(book, slo, shi)
 	}
-	// Current sheet relative reference
-	if slo == 0 && shi == 1 && slorel != 0 && shirel != 0 {
-		return ""
+	// assert (slo == 0 == shi-1) and slorel and shirel
+	if !(slo == 0 && shi-1 == 0 && slorel != 0 && shirel != 0) {
+		panic("Assertion failed in sheetrangerel")
 	}
 	return ""
 }
 
-// RangeName3D returns a 3D range name.
-func RangeName3D(book *Book, ref3d *Ref3D) string {
-	return fmt.Sprintf("%s!%s",
-		SheetRange(book, ref3d.ShtXLo, ref3d.ShtXHi),
-		RangeName2D(ref3d.RowXLo, ref3d.RowXHi, ref3d.ColXLo, ref3d.ColXHi, false))
+// ===== CLASSES/STRUCTS =====
+
+// FormulaError represents a formula error
+type FormulaError struct {
+	message string
 }
 
-// RangeName3DRel returns a relative 3D range name.
-func RangeName3DRel(book *Book, ref3d *Ref3D, browx, bcolx *int, r1c1 bool) string {
-	shdesc := SheetRangeRel(book, []int{ref3d.ShtXLo, ref3d.ShtXHi}, []int{ref3d.RelFlags[0], ref3d.RelFlags[1]})
-	rngdesc := RangeName2DRel([]int{ref3d.RowXLo, ref3d.RowXHi, ref3d.ColXLo, ref3d.ColXHi},
-		[]int{ref3d.RelFlags[2], ref3d.RelFlags[3], ref3d.RelFlags[4], ref3d.RelFlags[5]},
-		browx, bcolx, r1c1)
-
-	if shdesc == "" {
-		return rngdesc
-	}
-	return fmt.Sprintf("%s!%s", shdesc, rngdesc)
+func (e *FormulaError) Error() string {
+	return e.message
 }
 
-// DecompileFormula decompiles a formula into a human-readable string.
-func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, bcolx *int, blah, level, r1c1 int) (string, error) {
-	if level > STACK_ALARM_LEVEL {
-		blah = 1
-	}
-
-	reldelta := 0
-	if fmlatype == FMLA_TYPE_SHARED || fmlatype == FMLA_TYPE_NAME || fmlatype == FMLA_TYPE_COND_FMT || fmlatype == FMLA_TYPE_DATA_VAL {
-		reldelta = 1
-	}
-
-	data := fmla
-	bv := bk.BiffVersion
-
-	if blah != 0 && bk.logfile != nil {
-		fmt.Fprintf(bk.logfile, "::: decompile_formula len=%d fmlatype=%d browx=%v bcolx=%v reldelta=%d r1c1=%d level=%d\n",
-			fmlalen, fmlatype, browx, bcolx, reldelta, r1c1, level)
-		// TODO: Implement hex dump
-	}
-
-	if level > STACK_PANIC_LEVEL {
-		return "#RECURSION!", fmt.Errorf("excessive indirect references in formula")
-	}
-
-	sztab, exists := szdict[bv]
-	if !exists {
-		return "#UNSUPPORTED_BIFF!", fmt.Errorf("unsupported BIFF version %d", bv)
-	}
-
-	pos := 0
-	stack := []*Operand{}
-	unkOpnd := NewOperand(oUNK, nil, LEAF_RANK, "?")
-	errorOpnd := NewOperand(oERR, nil, LEAF_RANK, "#ERROR!")
-
-	_ = errorOpnd // Mark as used
-
-	doBinop := func(opcd int, stk []*Operand) {
-		if len(stk) < 2 {
-			return
-		}
-		bop := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
-		aop := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
-
-		rule, exists := binopRules[opcd]
-		if !exists {
-			stk = append(stk, unkOpnd)
-			return
-		}
-
-		resultKind := rule[1].(int)
-		rank := rule[3].(int)
-		sym := rule[4].(string)
-
-		otext := ""
-		if aop.Rank < rank {
-			otext += "("
-		}
-		otext += aop.Text
-		if aop.Rank < rank {
-			otext += ")"
-		}
-		otext += sym
-		if bop.Rank < rank {
-			otext += "("
-		}
-		otext += bop.Text
-		if bop.Rank < rank {
-			otext += ")"
-		}
-
-		resop := NewOperand(resultKind, nil, rank, otext)
-		stk = append(stk, resop)
-	}
-
-	doUnaryop := func(opcode, resultKind int, stk []*Operand) {
-		if len(stk) < 1 {
-			return
-		}
-		aop := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
-
-		rule, exists := unopRules[opcode]
-		if !exists {
-			stack = append(stack, unkOpnd)
-			return
-		}
-
-		rank := rule[1].(int)
-		sym1 := rule[2].(string)
-		sym2 := rule[3].(string)
-
-		otext := sym1
-		if aop.Rank < rank {
-			otext += "("
-		}
-		otext += aop.Text
-		if aop.Rank < rank {
-			otext += ")"
-		}
-		otext += sym2
-
-		stack = append(stack, NewOperand(resultKind, nil, rank, otext))
-	}
-
-	unexpectedOpcode := func(opArg int, onameArg string) {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "ERROR *** Unexpected token 0x%02x (%s) found in formula type %s\n",
-				opArg, onameArg, FmlaTypeDescrMap[fmlatype])
-		}
-	}
-
-	if fmlalen == 0 {
-		stack = append(stack, unkOpnd)
-	}
-
-	for pos < fmlalen {
-		if pos >= len(data) {
-			break
-		}
-
-		op := int(data[pos])
-		opcode := op & 0x1f
-		optype := (op & 0x60) >> 5
-		opx := opcode
-		if optype != 0 {
-			opx = opcode + 32
-		}
-
-		oname := "?"
-		if opx < len(onames) {
-			oname = onames[opx]
-		}
-
-		sz := -1
-		if opx < len(sztab) {
-			sz = sztab[opx]
-		}
-
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "Pos:%d Op:0x%02x opname:%s Sz:%d opcode:%02xh optype:%02xh\n",
-				pos, op, oname, sz, opcode, optype)
-			fmt.Fprintf(bk.logfile, "Stack = %v\n", stack)
-		}
-
-		if sz == -2 {
-			return "#INVALID!", fmt.Errorf("ERROR *** Unexpected token 0x%02x (\"%s\"); biff_version=%d", op, oname, bv)
-		}
-
-		// Check if token is not allowed for this formula type
-		if fmlatype >= 0 && fmlatype < len(TokenNotAllowed) {
-			if TokenNotAllowed[fmlatype]&(1<<uint(opx)) != 0 {
-				unexpectedOpcode(op, oname)
-			}
-		}
-
-		if optype == 0 {
-			if opcode <= 0x01 { // tExp, tTbl
-				if bv >= 30 {
-					// Parse shared formula reference
-					if pos+4 >= len(data) {
-						return "#INVALID!", fmt.Errorf("insufficient data for shared formula reference")
-					}
-					rowx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-					colx := int(binary.LittleEndian.Uint16(data[pos+3 : pos+5]))
-					text := fmt.Sprintf("SHARED FMLA at rowx=%d colx=%d", rowx, colx)
-					stack = append(stack, NewOperand(oUNK, nil, LEAF_RANK, text))
-					if fmlatype != FMLA_TYPE_CELL && fmlatype != FMLA_TYPE_ARRAY {
-						unexpectedOpcode(op, oname)
-					}
-				} else {
-					// BIFF < 30 shared formula
-					if pos+3 >= len(data) {
-						return "#INVALID!", fmt.Errorf("insufficient data for shared formula reference")
-					}
-					rowx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-					colx := int(data[pos+3])
-					text := fmt.Sprintf("SHARED FMLA at rowx=%d colx=%d", rowx, colx)
-					stack = append(stack, NewOperand(oUNK, nil, LEAF_RANK, text))
-					if fmlatype != FMLA_TYPE_CELL && fmlatype != FMLA_TYPE_ARRAY {
-						unexpectedOpcode(op, oname)
-					}
-				}
-			} else if 0x03 <= opcode && opcode <= 0x0E { // binary operations
-				doBinop(opcode, stack)
-			} else if opcode == 0x0F { // tIsect
-				// TODO: Implement intersection logic
-				pos += sz
-				continue
-			} else if opcode == 0x10 { // tUnion/List
-				// TODO: Implement union logic
-				pos += sz
-				continue
-			} else if opcode == 0x11 { // tRange
-				// TODO: Implement range logic
-				pos += sz
-				continue
-			} else if opcode == 0x12 { // tUplus
-				doUnaryop(0x12, oNUM, stack)
-			} else if opcode == 0x13 { // tUminus
-				doUnaryop(0x13, oNUM, stack)
-			} else if opcode == 0x14 { // tPercent
-				doUnaryop(0x14, oNUM, stack)
-			} else if opcode == 0x15 { // tParen
-				if len(stack) > 0 {
-					aop := stack[len(stack)-1]
-					stack = stack[:len(stack)-1]
-					otext := "(" + aop.Text + ")"
-					stack = append(stack, NewOperand(aop.Kind, aop.Value, FUNC_RANK, otext))
-				}
-			} else if opcode == 0x16 { // tMissArg
-				stack = append(stack, NewOperand(oMSNG, nil, LEAF_RANK, ""))
-			} else if opcode == 0x17 { // tStr
-				// Parse string
-				if pos+1 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for string")
-				}
-				strlen := int(data[pos+1])
-				if pos+2+strlen > len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for string content")
-				}
-				strval := string(data[pos+2 : pos+2+strlen])
-				stack = append(stack, NewOperand(oSTRG, strval, LEAF_RANK, fmt.Sprintf("\"%s\"", strval)))
-			} else if opcode == 0x18 { // tExtended
-				// TODO: Handle extended token
-				pos += sz
-				continue
-			} else if opcode == 0x19 { // tAttr
-				// Parse attributes
-				if pos+2 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for attributes")
-				}
-				attr := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				if attr&0x04 != 0 { // volatile
-					// TODO: Handle volatile
-				}
-				if attr&0x10 != 0 { // if
-					// TODO: Handle if
-				}
-				pos += sz
-				continue
-			} else if opcode == 0x1A { // tSheet
-				// TODO: Handle sheet reference
-				pos += sz
-				continue
-			} else if opcode == 0x1B { // tEndSheet
-				// TODO: Handle end sheet
-				pos += sz
-				continue
-			} else if opcode == 0x1C { // tErr
-				// Parse error code
-				if pos+2 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for error")
-				}
-				errcode := int(data[pos+1])
-				errtext := "#ERROR!"
-				switch errcode {
-				case 0x00:
-					errtext = "#NULL!"
-				case 0x07:
-					errtext = "#DIV/0!"
-				case 0x0F:
-					errtext = "#VALUE!"
-				case 0x17:
-					errtext = "#REF!"
-				case 0x1D:
-					errtext = "#NAME?"
-				case 0x24:
-					errtext = "#NUM!"
-				case 0x2A:
-					errtext = "#N/A"
-				}
-				stack = append(stack, NewOperand(oERR, errcode, LEAF_RANK, errtext))
-			} else if opcode == 0x1D { // tBool
-				// Parse boolean
-				if pos+2 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for boolean")
-				}
-				boolval := int(data[pos+1])
-				text := "FALSE"
-				if boolval != 0 {
-					text = "TRUE"
-				}
-				stack = append(stack, NewOperand(oBOOL, boolval, LEAF_RANK, text))
-			} else if opcode == 0x1E { // tInt
-				// Parse integer
-				if pos+3 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for integer")
-				}
-				intval := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				stack = append(stack, NewOperand(oNUM, float64(intval), LEAF_RANK, fmt.Sprintf("%d", intval)))
-			} else if opcode == 0x1F { // tNum
-				// Parse number
-				if pos+9 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for number")
-				}
-				numval := math.Float64frombits(binary.LittleEndian.Uint64(data[pos+1 : pos+9]))
-				stack = append(stack, NewOperand(oNUM, numval, LEAF_RANK, fmt.Sprintf("%g", numval)))
-			}
-		} else {
-			// Handle RVA (Reference, Value, Array) tokens
-			switch opx {
-			case 0x20: // tArray
-				// TODO: Parse array constant
-				pos += sz
-				continue
-			case 0x21: // tFunc
-				// Parse function
-				if pos+2 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for function")
-				}
-				funcid := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				funcname := "UNKNOWN_FUNC"
-				if funcid < len(funcDefs) {
-					if name, ok := funcDefs[funcid][0].(string); ok {
-						funcname = name
-					}
-				}
-				// TODO: Handle function arguments
-				stack = append(stack, NewOperand(oUNK, nil, FUNC_RANK, funcname+"(?)"))
-			case 0x22: // tFuncVar
-				// Parse variable function
-				if pos+3 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for variable function")
-				}
-				funcid := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				nargs := int(data[pos+3])
-				funcname := "UNKNOWN_FUNC"
-				if funcid < len(funcDefs) {
-					if name, ok := funcDefs[funcid][0].(string); ok {
-						funcname = name
-					}
-				}
-				// TODO: Handle function arguments
-				stack = append(stack, NewOperand(oUNK, nil, FUNC_RANK, fmt.Sprintf("%s(?%d)", funcname, nargs)))
-			case 0x23: // tName
-				// Parse name reference
-				if pos+4 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for name reference")
-				}
-				namex := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				// TODO: Resolve name
-				stack = append(stack, NewOperand(oUNK, nil, LEAF_RANK, fmt.Sprintf("NAME_%d", namex)))
-			case 0x24: // tRef
-				// Parse cell reference
-				r1, c1, rr1, cr1 := GetCellAddr(data, pos+1, bv, reldelta != 0, browx, bcolx)
-				reftext := CellNameRel(r1, c1, rr1, cr1, browx, bcolx, r1c1 != 0)
-				stack = append(stack, NewOperand(oREF, []int{r1, c1, rr1, cr1}, LEAF_RANK, reftext))
-			case 0x25: // tArea
-				// Parse area reference
-				addr1, addr2 := GetCellRangeAddr(data, pos+1, bv, reldelta != 0, browx, bcolx)
-				r1, c1, rr1, cr1 := addr1[0], addr1[1], addr1[2], addr1[3]
-				r2, c2, rr2, cr2 := addr2[0], addr2[1], addr2[2], addr2[3]
-				reftext := RangeName2DRel([]int{r1, r2, c1, c2}, []int{rr1, rr2, cr1, cr2}, browx, bcolx, r1c1 != 0)
-				stack = append(stack, NewOperand(oREF, []int{r1, c1, rr1, cr1, r2, c2, rr2, cr2}, LEAF_RANK, reftext))
-			case 0x26: // tMemArea
-				// TODO: Parse memory area
-				pos += sz
-				continue
-			case 0x27: // tMemErr
-				// TODO: Parse memory error
-				pos += sz
-				continue
-			case 0x28: // tMemNoMem
-				// TODO: Parse no memory
-				pos += sz
-				continue
-			case 0x29: // tMemFunc
-				// TODO: Parse memory function
-				pos += sz
-				continue
-			case 0x2A: // tRefErr
-				// Parse reference error
-				stack = append(stack, NewOperand(oERR, nil, LEAF_RANK, "#REF!"))
-			case 0x2B: // tAreaErr
-				// Parse area error
-				stack = append(stack, NewOperand(oERR, nil, LEAF_RANK, "#REF!"))
-			case 0x2C: // tRefN
-				// Parse relative reference
-				r1, c1, rr1, cr1 := GetCellAddr(data, pos+1, bv, reldelta != 0, browx, bcolx)
-				reftext := CellNameRel(r1, c1, rr1, cr1, browx, bcolx, r1c1 != 0)
-				stack = append(stack, NewOperand(oREL, []int{r1, c1, rr1, cr1}, LEAF_RANK, reftext))
-			case 0x2D: // tAreaN
-				// Parse relative area
-				addr1, addr2 := GetCellRangeAddr(data, pos+1, bv, reldelta != 0, browx, bcolx)
-				r1, c1, rr1, cr1 := addr1[0], addr1[1], addr1[2], addr1[3]
-				r2, c2, rr2, cr2 := addr2[0], addr2[1], addr2[2], addr2[3]
-				reftext := RangeName2DRel([]int{r1, r2, c1, c2}, []int{rr1, rr2, cr1, cr2}, browx, bcolx, r1c1 != 0)
-				stack = append(stack, NewOperand(oREL, []int{r1, c1, rr1, cr1, r2, c2, rr2, cr2}, LEAF_RANK, reftext))
-			case 0x2E: // tMemAreaN
-				// TODO: Parse relative memory area
-				pos += sz
-				continue
-			case 0x2F: // tMemNoMemN
-				// TODO: Parse relative no memory
-				pos += sz
-				continue
-			case 0x39: // tNameX
-				// Parse external name
-				if pos+6 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for external name")
-				}
-				extshtx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				namex := int(binary.LittleEndian.Uint16(data[pos+3 : pos+5]))
-				// TODO: Resolve external name
-				sht1, sht2 := GetExternsheetLocalRange(bk, extshtx, blah)
-				if sht1 >= 0 && sht2 >= 0 {
-					sheetname := bk.SheetNames()[sht1]
-					stack = append(stack, NewOperand(oUNK, nil, LEAF_RANK, fmt.Sprintf("%s!NAME_%d", sheetname, namex)))
-				} else {
-					stack = append(stack, NewOperand(oUNK, nil, LEAF_RANK, fmt.Sprintf("EXTERN_NAME_%d_%d", extshtx, namex)))
-				}
-			case 0x3A: // tRef3d
-				// Parse 3D reference
-				if pos+6 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for 3D reference")
-				}
-				extshtx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				r1, c1, rr1, cr1 := GetCellAddr(data, pos+3, bv, reldelta != 0, browx, bcolx)
-				sht1, sht2 := GetExternsheetLocalRange(bk, extshtx, blah)
-				reftext := ""
-				if sht1 >= 0 && sht2 >= 0 {
-					ref3d := NewRef3D([]int{sht1, sht2, r1, r1 + 1, c1, c1 + 1, rr1, rr1, cr1, cr1})
-					reftext = RangeName3DRel(bk, ref3d, browx, bcolx, r1c1 != 0)
-				}
-				stack = append(stack, NewOperand(oREF, []int{sht1, sht2, r1, c1, rr1, cr1}, LEAF_RANK, reftext))
-			case 0x3B: // tArea3d
-				// Parse 3D area
-				if pos+10 >= len(data) {
-					return "#INVALID!", fmt.Errorf("insufficient data for 3D area")
-				}
-				extshtx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				addr1, addr2 := GetCellRangeAddr(data, pos+3, bv, reldelta != 0, browx, bcolx)
-				r1, c1, rr1, cr1 := addr1[0], addr1[1], addr1[2], addr1[3]
-				r2, c2, rr2, cr2 := addr2[0], addr2[1], addr2[2], addr2[3]
-				sht1, sht2 := GetExternsheetLocalRange(bk, extshtx, blah)
-				reftext := ""
-				if sht1 >= 0 && sht2 >= 0 {
-					ref3d := NewRef3D([]int{sht1, sht2, r1, r2, c1, c2, rr1, rr2, cr1, cr2})
-					reftext = RangeName3DRel(bk, ref3d, browx, bcolx, r1c1 != 0)
-				}
-				stack = append(stack, NewOperand(oREF, []int{sht1, sht2, r1, c1, rr1, cr1, r2, c2, rr2, cr2}, LEAF_RANK, reftext))
-			case 0x3C: // tRefErr3d
-				// Parse 3D reference error
-				stack = append(stack, NewOperand(oERR, nil, LEAF_RANK, "#REF!"))
-			case 0x3D: // tAreaErr3d
-				// Parse 3D area error
-				stack = append(stack, NewOperand(oERR, nil, LEAF_RANK, "#REF!"))
-			}
-		}
-
-		if sz <= 0 {
-			sz = 1
-		}
-		pos += sz
-	}
-
-	if len(stack) == 0 {
-		return "?", nil
-	}
-
-	result := stack[len(stack)-1]
-	return result.Text, nil
+// Operand represents an operand in a formula
+type Operand struct {
+	kind  int
+	value interface{}
+	text  string
+	rpn   []interface{}
+	_rank int
 }
 
-// DumpFormula dumps a formula for debugging purposes.
+// Rank returns the rank of the operand
+func (op *Operand) Rank() int {
+	return op._rank
+}
+
+// SetRank sets the rank of the operand
+func (op *Operand) SetRank(rank int) {
+	op._rank = rank
+}
+
+// Ref3D represents a 3D reference
+type Ref3D struct {
+	shtxlo   int
+	shtxhi   int
+	rlo      int
+	rhi      int
+	clo      int
+	chi      int
+	coords   []int // [slo, shi, rlo, rhi, clo, chi]
+	relflags []int // [slorel, shirel, rlorel, rhirel, clorel, chirel]
+}
+
+// NewRef3D creates a new Ref3D
+func NewRef3D(coords_relflags ...int) *Ref3D {
+	r := &Ref3D{}
+	if len(coords_relflags) >= 6 {
+		r.coords = coords_relflags[:6]
+		r.shtxlo = r.coords[0]
+		r.shtxhi = r.coords[1]
+		r.rlo = r.coords[2]
+		r.rhi = r.coords[3]
+		r.clo = r.coords[4]
+		r.chi = r.coords[5]
+	}
+	if len(coords_relflags) >= 12 {
+		r.relflags = coords_relflags[6:12]
+	} else {
+		r.relflags = []int{0, 0, 0, 0, 0, 0}
+	}
+	return r
+}
+
+// dump_formula dumps formula data for debugging
 func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah int, isname int) {
-	if blah == 0 || bk.logfile == nil {
-		return
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "dump_formula %d %d %d\n", fmlalen, bv, len(data))
+		HexCharDump(data, 0, fmlalen, bv, bk.logfile, true)
 	}
-
-	fmt.Fprintf(bk.logfile, "dump_formula %d %d %d\n", fmlalen, bv, len(data))
-	// Use the existing HexCharDump function from biffh.go
-	HexCharDump(data, 0, fmlalen, 0, bk.logfile, false)
-
-	if bv < 80 {
-		fmt.Fprintf(bk.logfile, "DumpFormula: BIFF version %d not supported\n", bv)
-		return
-	}
-
-	sztab, exists := szdict[bv]
-	if !exists {
-		fmt.Fprintf(bk.logfile, "DumpFormula: unsupported BIFF version %d\n", bv)
-		return
-	}
-
+	// Note: this function currently supports BIFF >= 80, but may need updating for older versions
+	sztab := szdict[bv]
 	pos := 0
-	for pos < fmlalen {
-		if pos >= len(data) {
-			break
-		}
+	stack := []interface{}{}
 
+	anyRel := 0
+	anyErr := 0
+
+	for pos >= 0 && pos < fmlalen {
 		op := int(data[pos])
 		opcode := op & 0x1f
 		optype := (op & 0x60) >> 5
-		opx := opcode
+		var opx int
 		if optype != 0 {
 			opx = opcode + 32
+		} else {
+			opx = opcode
 		}
+		oname := onames[opx]
 
-		oname := "?"
-		if opx < len(onames) {
-			oname = onames[opx]
+		sz := sztab[opx]
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "Pos:%d Op:0x%02x Name:t%s Sz:%d opcode:%02xh optype:%02xh\n",
+				pos, op, oname, sz, opcode, optype)
 		}
-
-		sz := -1
-		if opx < len(sztab) {
-			sz = sztab[opx]
-		}
-
-		fmt.Fprintf(bk.logfile, "Pos:%d Op:0x%02x Name:t%s Sz:%d opcode:%02xh optype:%02xh\n",
-			pos, op, oname, sz, opcode, optype)
-
-		if !(optype == 0) {
+		if optype == 0 {
 			if opcode >= 0x01 && opcode <= 0x02 { // tExp, tTbl
 				// reference to a shared formula or table record
-				if pos+4 < len(data) {
-					rowx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-					colx := int(binary.LittleEndian.Uint16(data[pos+3 : pos+5]))
-					fmt.Fprintf(bk.logfile, "  (%d, %d)\n", rowx, colx)
+				rowx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+				colx := int(binary.LittleEndian.Uint16(data[pos+3 : pos+5]))
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "  %d, %d\n", rowx, colx)
+				}
+			} else if opcode == 0x10 { // tList
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tList pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					fmt.Fprintf(bk.logfile, "tList: insufficient stack items\n")
+					return
+				}
+				bop := stack[len(stack)-1]
+				aop := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				// Concatenate lists
+				result := append(aop.([]interface{}), bop.([]interface{})...)
+				spush(stack, result)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tlist post %v\n", stack)
+				}
+			} else if opcode == 0x11 { // tRange
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRange pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					fmt.Fprintf(bk.logfile, "tRange: insufficient stack items\n")
+					return
+				}
+				bop := stack[len(stack)-1]
+				aop := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				if len(aop.([]interface{})) != 1 || len(bop.([]interface{})) != 1 {
+					fmt.Fprintf(bk.logfile, "tRange: invalid operands\n")
+					return
+				}
+				result := doBoxFuncs(tRangeFuncs, aop.([]interface{})[0].(*Ref3D), bop.([]interface{})[0].(*Ref3D))
+				spush(stack, result)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRange post %v\n", stack)
+				}
+			} else if opcode == 0x0F { // tIsect
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tIsect pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					fmt.Fprintf(bk.logfile, "tIsect: insufficient stack items\n")
+					return
+				}
+				bop := stack[len(stack)-1]
+				aop := stack[len(stack)-2]
+				stack = stack[:len(stack)-2]
+				if len(aop.([]interface{})) != 1 || len(bop.([]interface{})) != 1 {
+					fmt.Fprintf(bk.logfile, "tIsect: invalid operands\n")
+					return
+				}
+				result := doBoxFuncs(tIsectFuncs, aop.([]interface{})[0].(*Ref3D), bop.([]interface{})[0].(*Ref3D))
+				spush(stack, result)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tIsect post %v\n", stack)
+				}
+			} else if opcode == 0x19 { // tAttr
+				subop := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+				nc := int(data[pos+3])
+				subname := tAttrNames[subop]
+				if subname == "" {
+					subname = "??Unknown??"
+				}
+				if subop == 0x04 { // Choose
+					sz = nc*2 + 6
+				} else {
+					sz = 4
+				}
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "   subop=%02xh subname=t%s sz=%d nc=%02xh\n", subop, subname, sz, nc)
+				}
+			} else if opcode == 0x17 { // tStr
+				var strg string
+				var newpos int
+				if bv <= 70 {
+					nc := int(data[pos+1])
+					strg = string(data[pos+2 : pos+2+nc]) // left in 8-bit encoding
+					sz = nc + 2
+				} else {
+					strg, newpos = unpack_unicode_update_pos(data, pos+1, 1, -1)
+					sz = newpos - pos
+				}
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "   sz=%d strg=%q\n", sz, strg)
+				}
+			} else {
+				if sz <= 0 {
+					fmt.Fprintf(bk.logfile, "**** Dud size; exiting ****\n")
+					return
 				}
 			}
+			pos += sz
+			continue
+		}
+
+		// Handle different opcode types
+		if opcode == 0x00 { // tArray
+			// No special processing needed for tArray
+		} else if opcode == 0x01 { // tFunc
+			nb := 1
+			if bv >= 40 {
+				nb = 2
+			}
+			funcx := 0
+			if nb == 1 {
+				funcx = int(data[pos+1])
+			} else {
+				funcx = int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+			}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   FuncID=%d\n", funcx)
+			}
+		} else if opcode == 0x02 { // tFuncVar
+			nb := 1
+			if bv >= 40 {
+				nb = 2
+			}
+			nargs := int(data[pos+1])
+			funcx := 0
+			if nb == 1 {
+				funcx = int(data[pos+2])
+			} else {
+				funcx = int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+			}
+			prompt := nargs >> 7
+			nargs &= 0x7F
+			macro := funcx >> 15
+			funcx &= 0x7FFF
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   FuncID=%d nargs=%d macro=%d prompt=%d\n", funcx, nargs, macro, prompt)
+			}
+		} else if opcode == 0x03 { // tName
+			namex := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   namex=%d\n", namex)
+			}
+		} else if opcode == 0x04 { // tRef
+			rowx, colx, rowRel, colRel := getCellAddr(data, pos+1, bv, reldelta, nil, nil)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   (%d, %d, %d, %d)\n", rowx, colx, rowRel, colRel)
+			}
+		} else if opcode == 0x05 { // tArea
+			res1, res2 := getCellRangeAddr(data, pos+1, bv, reldelta, nil, nil)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v %v\n", res1, res2)
+			}
+		} else if opcode == 0x09 { // tMemFunc
+			nb := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %d bytes of cell ref formula\n", nb)
+			}
+		} else if opcode == 0x0C { // tRefN
+			rowx, colx, rowRel, colRel := getCellAddr(data, pos+1, bv, 1, nil, nil) // note *ALL* tRefN usage has signed offset for relative addresses
+			anyRel = 1
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   (%d, %d, %d, %d)\n", rowx, colx, rowRel, colRel)
+			}
+		} else if opcode == 0x0D { // tAreaN
+			res1, res2 := getCellRangeAddr(data, pos+1, bv, 1, nil, nil) // note *ALL* tAreaN usage has signed offset for relative addresses
+			anyRel = 1
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v %v\n", res1, res2)
+			}
+		} else if opcode == 0x1A { // tRef3d
+			refx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+			rowx, colx, rowRel, colRel := getCellAddr(data, pos+3, bv, reldelta, nil, nil)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   refx=%d (%d, %d, %d, %d)\n", refx, rowx, colx, rowRel, colRel)
+			}
+			if rowRel != 0 || colRel != 0 {
+				anyRel = 1
+			}
+			shx1, shx2 := getExternsheetLocalRange(bk, refx, blah)
+			if shx1 < -1 {
+				anyErr = 1
+			}
+			coords := []int{shx1, shx2 + 1, rowx, rowx + 1, colx, colx + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			if optype == 1 {
+				spush(stack, coords)
+			}
+		} else if opcode == 0x1B { // tArea3d
+			refx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+			res1, res2 := getCellRangeAddr(data, pos+3, bv, reldelta, nil, nil)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   refx=%d %v %v\n", refx, res1, res2)
+			}
+			rowx1, colx1, rowRel1, colRel1 := res1[0], res1[1], res1[2], res1[3]
+			rowx2, colx2, rowRel2, colRel2 := res2[0], res2[1], res2[2], res2[3]
+			if rowRel1 != 0 || colRel1 != 0 || rowRel2 != 0 || colRel2 != 0 {
+				anyRel = 1
+			}
+			shx1, shx2 := getExternsheetLocalRange(bk, refx, blah)
+			if shx1 < -1 {
+				anyErr = 1
+			}
+			coords := []int{shx1, shx2 + 1, rowx1, rowx2 + 1, colx1, colx2 + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			if optype == 1 {
+				spush(stack, coords)
+			}
+		} else if opcode == 0x19 { // tNameX
+			refx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
+			namex := int(binary.LittleEndian.Uint16(data[pos+3 : pos+5]))
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   refx=%d namex=%d\n", refx, namex)
+			}
+		} else if _, exists := errorOpcodes[opcode]; exists {
+			anyErr = 1
 		} else {
-			// RVA tokens - could add more detailed parsing here
-			// For now, just show the token
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "FORMULA: /// Not handled yet: t%s\n", oname)
+			}
+			anyErr = 1
 		}
 
 		if sz <= 0 {
-			sz = 1
+			fmt.Fprintf(bk.logfile, "**** Dud size; exiting ****\n")
+			return
 		}
 		pos += sz
 	}
-}
 
-// colname returns the column name for a given column index (0-based).
-// Example: colname(0) returns "A", colname(25) returns "Z", colname(26) returns "AA"
-func colname(colx int) string {
-	alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	if colx <= 25 {
-		return string(alphabet[colx])
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "End of formula. any_rel=%d any_err=%d stack=%v\n",
+			boolToInt(anyRel != 0), anyErr, stack)
+		if len(stack) >= 2 {
+			fmt.Fprintf(bk.logfile, "*** Stack has unprocessed args\n")
+		}
 	}
-	xdiv26 := colx / 26
-	xmod26 := colx % 26
-	return string(alphabet[xdiv26-1]) + string(alphabet[xmod26])
 }
 
-// CellName returns the cell name for a given row and column (0-based).
-// Example: CellName(0, 0) returns "A1", CellName(5, 7) returns "H6"
-func CellName(rowx, colx int) string {
-	return colname(colx) + fmt.Sprintf("%d", rowx+1)
+// spush appends an item to the stack
+func spush(stack []interface{}, item interface{}) []interface{} {
+	return append(stack, item)
 }
 
-// CellNameAbs returns the absolute cell name.
-// Example: CellNameAbs(5, 7, false) returns "$H$6"
-// If r1c1 is true, returns R1C1 style: "R6C8"
-func CellNameAbs(rowx, colx int, r1c1 bool) string {
-	if r1c1 {
-		return fmt.Sprintf("R%dC%d", rowx+1, colx+1)
+// boolToInt converts boolean to int
+func boolToInt(b bool) int {
+	if b {
+		return 1
 	}
-	return fmt.Sprintf("$%s$%d", colname(colx), rowx+1)
+	return 0
 }
 
-// RangeName2D returns a 2D range name.
-// Example: RangeName2D(5, 20, 7, 10, false) returns "$H$6:$J$20"
-func RangeName2D(rlo, rhi, clo, chi int, r1c1 bool) string {
-	if r1c1 {
-		return fmt.Sprintf("R%dC%d:R%dC%d", rlo+1, clo+1, rhi, chi)
-	}
-	if rhi == rlo+1 && chi == clo+1 {
-		return CellNameAbs(rlo, clo, r1c1)
-	}
-	return fmt.Sprintf("%s:%s", CellNameAbs(rlo, clo, r1c1), CellNameAbs(rhi-1, chi-1, r1c1))
-}
-
-// DoBoxFuncs applies functions to corresponding coordinates of two Ref3D boxes.
-func DoBoxFuncs(boxFuncs []func(int, int) int, boxa, boxb *Ref3D) []int {
+// do_box_funcs performs box functions on two Ref3D objects
+func doBoxFuncs(boxFuncs []func(int, int) int, boxa, boxb *Ref3D) []int {
 	result := make([]int, 6)
-	for i := 0; i < 6; i++ {
-		result[i] = boxFuncs[i](boxa.Coords[i], boxb.Coords[i])
+	for i, fn := range boxFuncs {
+		result[i] = fn(boxa.coords[i], boxb.coords[i])
 	}
 	return result
 }
 
-// GetExternsheetLocalRange returns the local sheet range for an EXTERNSHEET reference.
-// This is used for BIFF8 and later.
-func GetExternsheetLocalRange(bk *Book, refx int, blah int) (int, int) {
+// adjust_cell_addr_biff8 adjusts cell address for BIFF8
+func adjustCellAddrBiff8(rowval, colval, reldelta int, browx, bcolx interface{}) (int, int, int, int) {
+	rowRel := (colval >> 15) & 1
+	colRel := (colval >> 14) & 1
+	rowx := rowval
+	colx := colval & 0xff
+
+	if reldelta != 0 {
+		if rowRel != 0 && rowx >= 32768 {
+			rowx -= 65536
+		}
+		if colRel != 0 && colx >= 128 {
+			colx -= 256
+		}
+	} else {
+		if browxInt, ok := browx.(int); ok && rowRel != 0 {
+			rowx -= browxInt
+		}
+		if bcolxInt, ok := bcolx.(int); ok && colRel != 0 {
+			colx -= bcolxInt
+		}
+	}
+	return rowx, colx, rowRel, colRel
+}
+
+// adjust_cell_addr_biff_le7 adjusts cell address for BIFF <= 7
+func adjustCellAddrBiffLe7(rowval, colval, reldelta int, browx, bcolx interface{}) (int, int, int, int) {
+	rowRel := (rowval >> 15) & 1
+	colRel := (rowval >> 14) & 1
+	rowx := rowval & 0x3fff
+	colx := colval
+
+	if reldelta != 0 {
+		if rowRel != 0 && rowx >= 8192 {
+			rowx -= 16384
+		}
+		if colRel != 0 && colx >= 128 {
+			colx -= 256
+		}
+	} else {
+		if browxInt, ok := browx.(int); ok && rowRel != 0 {
+			rowx -= browxInt
+		}
+		if bcolxInt, ok := bcolx.(int); ok && colRel != 0 {
+			colx -= bcolxInt
+		}
+	}
+	return rowx, colx, rowRel, colRel
+}
+
+// get_cell_addr gets cell address from binary data
+func getCellAddr(data []byte, pos, bv, reldelta int, browx, bcolx interface{}) (int, int, int, int) {
+	if bv >= 80 {
+		rowval := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		colval := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+		return adjustCellAddrBiff8(rowval, colval, reldelta, browx, bcolx)
+	} else {
+		rowval := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		colval := int(data[pos+2])
+		return adjustCellAddrBiffLe7(rowval, colval, reldelta, browx, bcolx)
+	}
+}
+
+// get_cell_range_addr gets cell range address from binary data
+func getCellRangeAddr(data []byte, pos, bv, reldelta int, browx, bcolx interface{}) ([4]int, [4]int) {
+	if bv >= 80 {
+		row1val := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		row2val := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+		col1val := int(binary.LittleEndian.Uint16(data[pos+4 : pos+6]))
+		col2val := int(binary.LittleEndian.Uint16(data[pos+6 : pos+8]))
+		r1x, c1x, r1rel, c1rel := adjustCellAddrBiff8(row1val, col1val, reldelta, browx, bcolx)
+		r2x, c2x, r2rel, c2rel := adjustCellAddrBiff8(row2val, col2val, reldelta, browx, bcolx)
+		return [4]int{r1x, c1x, r1rel, c1rel}, [4]int{r2x, c2x, r2rel, c2rel}
+	} else {
+		row1val := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		row2val := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+		col1val := int(data[pos+4])
+		col2val := int(data[pos+5])
+		r1x, c1x, r1rel, c1rel := adjustCellAddrBiffLe7(row1val, col1val, reldelta, browx, bcolx)
+		r2x, c2x, r2rel, c2rel := adjustCellAddrBiffLe7(row2val, col2val, reldelta, browx, bcolx)
+		return [4]int{r1x, c1x, r1rel, c1rel}, [4]int{r2x, c2x, r2rel, c2rel}
+	}
+}
+
+// get_externsheet_local_range gets external sheet local range
+func getExternsheetLocalRange(bk *Book, refx, blah int) (int, int) {
 	if refx < 0 || refx >= len(bk.externsheetInfo) {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "!!! GetExternsheetLocalRange: refx=%d, not in range(%d)\n", refx, len(bk.externsheetInfo))
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "!!! get_externsheet_local_range: refx=%d, not in range(%d)\n",
+				refx, len(bk.externsheetInfo))
 		}
 		return -101, -101
 	}
 
 	info := bk.externsheetInfo[refx]
-	refRecordx, refFirstSheetx, refLastSheetx := info[0], info[1], info[2]
+	refRecordx := info[0]
+	refFirstSheetx := info[1]
+	refLastSheetx := info[2]
 
 	if bk.supbookAddinsInx != nil && refRecordx == *bk.supbookAddinsInx {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRange(refx=%d) -> addins %v\n", refx, info)
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range(refx=%d) -> addins %v\n", refx, info)
 		}
 		if refFirstSheetx != 0xFFFE || refLastSheetx != 0xFFFE {
-			return -103, -103 // stuffed up somewhere
+			return -101, -101 // error
 		}
 		return -5, -5
 	}
 
-	if bk.supbookLocalsInx == nil || refRecordx != *bk.supbookLocalsInx {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRange(refx=%d) -> external %v\n", refx, info)
+	if bk.supbookLocalsInx != nil && refRecordx != *bk.supbookLocalsInx {
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range(refx=%d) -> external %v\n", refx, info)
 		}
 		return -4, -4 // external reference
 	}
 
 	if refFirstSheetx == 0xFFFE && refLastSheetx == 0xFFFE {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRange(refx=%d) -> unspecified sheet %v\n", refx, info)
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range(refx=%d) -> unspecified sheet %v\n", refx, info)
 		}
 		return -1, -1 // internal reference, any sheet
 	}
 
 	if refFirstSheetx == 0xFFFF && refLastSheetx == 0xFFFF {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRange(refx=%d) -> deleted sheet(s)\n", refx)
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range(refx=%d) -> deleted sheet(s)\n", refx)
 		}
 		return -2, -2 // internal reference, deleted sheet(s)
 	}
 
-	nsheets := len(bk.sheetNames)
+	nsheets := len(bk.allSheetsMap)
 	if !(0 <= refFirstSheetx && refFirstSheetx <= refLastSheetx && refLastSheetx < nsheets) {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRange(refx=%d) -> %v\n", refx, info)
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "/// get_externsheet_local_range(refx=%d) -> %v\n", refx, info)
 			fmt.Fprintf(bk.logfile, "--- first/last sheet not in range(%d)\n", nsheets)
 		}
 		return -102, -102 // stuffed up somewhere
 	}
 
-	// In Go, sheetNames only contains worksheets, so indices are direct
-	if !(0 <= refFirstSheetx && refLastSheetx < nsheets) {
+	xlrdSheetx1 := bk.allSheetsMap[refFirstSheetx]
+	xlrdSheetx2 := bk.allSheetsMap[refLastSheetx]
+	if !(0 <= xlrdSheetx1 && xlrdSheetx1 <= xlrdSheetx2) {
 		return -3, -3 // internal reference, but to a macro sheet
 	}
-
-	return refFirstSheetx, refLastSheetx
+	return xlrdSheetx1, xlrdSheetx2
 }
 
-// GetExternsheetLocalRangeB57 returns the local sheet range for an EXTERNSHEET reference.
-// This is used for BIFF 5.7 and earlier.
-func GetExternsheetLocalRangeB57(bk *Book, rawExtshtx, refFirstSheetx, refLastSheetx int, blah int) (int, int) {
-	if rawExtshtx > 0 {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRangeB57(raw_extshtx=%d) -> external\n", rawExtshtx)
-		}
-		return -4, -4 // external reference
-	}
-
-	if refFirstSheetx == -1 && refLastSheetx == -1 {
-		return -2, -2 // internal reference, deleted sheet(s)
-	}
-
-	nsheets := len(bk.sheetNames)
-	if !(0 <= refFirstSheetx && refFirstSheetx <= refLastSheetx && refLastSheetx < nsheets) {
-		if blah != 0 && bk.logfile != nil {
-			fmt.Fprintf(bk.logfile, "/// GetExternsheetLocalRangeB57(%d, %d, %d) -> ???\n", rawExtshtx, refFirstSheetx, refLastSheetx)
-			fmt.Fprintf(bk.logfile, "--- first/last sheet not in range(%d)\n", nsheets)
-		}
-		return -103, -103 // stuffed up somewhere
-	}
-
-	// In Go, sheetNames only contains worksheets, so indices are direct
-	if !(0 <= refFirstSheetx && refLastSheetx < nsheets) {
-		return -3, -3 // internal reference, but to a macro sheet
-	}
-
-	return refFirstSheetx, refLastSheetx
-}
-
-// EvaluateNameFormula evaluates a named formula.
-// This is a complex function that parses formula tokens for named references.
-func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah, level int) *Operand {
-	if level > STACK_ALARM_LEVEL {
+// evaluateNameFormula evaluates a named formula
+func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
+	if level > StackAlarmLevel {
 		blah = 1
 	}
-
 	data := nobj.RawFormula
 	fmlalen := nobj.BasicFormulaLen
 	bv := bk.BiffVersion
-	// reldelta := 1 // All defined name formulas use "Method B" [OOo docs] - not used
+	reldelta := 1 // All defined name formulas use "Method B" [OOo docs]
 
-	if blah != 0 && bk.logfile != nil {
-		fmt.Fprintf(bk.logfile, "::: evaluate_name_formula %d %s %d %d %v level=%d\n",
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "::: evaluate_name_formula %d %q %d %d %v level=%d\n",
 			namex, nobj.Name, fmlalen, bv, data, level)
-		// TODO: Implement hex dump
+		hexCharDump(data, 0, fmlalen, bk.logfile.(*os.File))
 	}
 
-	if level > STACK_PANIC_LEVEL {
-		// TODO: Return error operand instead of panicking
-		return NewOperand(oERR, nil, 0, "#ERROR!")
+	if level > StackPanicLevel {
+		panic(fmt.Sprintf("Excessive indirect references in NAME formula"))
 	}
 
-	sztab, exists := szdict[bv]
-	if !exists {
-		return NewOperand(oERR, nil, 0, "#UNSUPPORTED_BIFF!")
-	}
-
+	sztab := szdict[bv]
 	pos := 0
-	stack := []*Operand{}
+	stack := []interface{}{}
 	anyRel := 0
 	anyErr := 0
 	anyExternal := 0
-	unkOpnd := NewOperand(oUNK, nil, LEAF_RANK, "?")
-	errorOpnd := NewOperand(oERR, nil, LEAF_RANK, "#ERROR!")
+	unkOpnd := &Operand{kind: oUNK, value: nil}
+	errorOpnd := &Operand{kind: oERR, value: nil}
+	spush := func(item interface{}) {
+		stack = append(stack, item)
+	}
 
-	_ = anyRel      // Mark as used
-	_ = anyErr      // Mark as used
-	_ = anyExternal // Mark as used
-	_ = errorOpnd   // Mark as used
-
-	doBinop := func(opcd int, stk []*Operand) {
+	doBinop := func(opcd int, stk []interface{}) {
 		if len(stk) < 2 {
 			return
 		}
-		bop := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
-		aop := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
-
-		rule, exists := binopRules[opcd]
-		if !exists {
-			stk = append(stk, unkOpnd)
-			return
-		}
-
-		argdict := rule[0].(map[int]func(interface{}) interface{})
-		resultKind := rule[1].(int)
-		fn := rule[2].(func(interface{}, interface{}) interface{})
-		rank := rule[3].(int)
-		sym := rule[4].(string)
+		bop := stk[len(stk)-1].(*Operand)
+		aop := stk[len(stk)-2].(*Operand)
+		rule := binopRules[opcd]
+		argdict := rule.argdict
+		resultType := rule.resultType
+		fn := rule.op.(func(interface{}, interface{}) interface{})
+		rank := rule.priority
+		sym := rule.symbol
 
 		otext := ""
-		if aop.Rank < rank {
+		if aop._rank < rank {
 			otext += "("
 		}
-		otext += aop.Text
-		if aop.Rank < rank {
+		otext += aop.text
+		if aop._rank < rank {
 			otext += ")"
 		}
 		otext += sym
-		if bop.Rank < rank {
+		if bop._rank < rank {
 			otext += "("
 		}
-		otext += bop.Text
-		if bop.Rank < rank {
+		otext += bop.text
+		if bop._rank < rank {
 			otext += ")"
 		}
 
-		resop := NewOperand(resultKind, nil, rank, otext)
+		resop := &Operand{kind: resultType, value: nil, _rank: rank, text: otext}
 
-		bconv, bExists := argdict[bop.Kind]
-		aconv, aExists := argdict[aop.Kind]
-		if !bExists || !aExists {
-			stack = append(stack, resop)
+		if bop.value == nil || aop.value == nil {
+			stk = stk[:len(stk)-2]
+			stk = append(stk, resop)
 			return
 		}
 
-		if bop.Value == nil || aop.Value == nil {
-			stack = append(stack, resop)
+		var bconv, aconv func(interface{}) interface{}
+		var ok bool
+		if bconv, ok = argdict[bop.kind].(func(interface{}) interface{}); !ok {
+			stk = stk[:len(stk)-2]
+			stk = append(stk, resop)
+			return
+		}
+		if aconv, ok = argdict[aop.kind].(func(interface{}) interface{}); !ok {
+			stk = stk[:len(stk)-2]
+			stk = append(stk, resop)
 			return
 		}
 
-		bval := bconv(bop.Value)
-		aval := aconv(aop.Value)
+		bval := bconv(bop.value)
+		aval := aconv(aop.value)
 		result := fn(aval, bval)
-		if resultKind == oBOOL {
+		if resultType == oBOOL {
 			if result.(bool) {
 				result = 1
 			} else {
 				result = 0
 			}
 		}
-		resop.Value = result
-		stack = append(stack, resop)
+		resop.value = result
+		stk = stk[:len(stk)-2]
+		stk = append(stk, resop)
 	}
 
-	doUnaryop := func(opcode, resultKind int, stk []*Operand) {
+	doUnaryop := func(opcode int, resultType int, stk []interface{}) {
 		if len(stk) < 1 {
 			return
 		}
-		aop := stk[len(stk)-1]
-		stk = stk[:len(stk)-1]
-
-		rule, exists := unopRules[opcode]
-		if !exists {
-			stack = append(stack, unkOpnd)
-			return
-		}
-
-		fn := rule[0].(func(float64) float64)
-		rank := rule[1].(int)
-		sym1 := rule[2].(string)
-		sym2 := rule[3].(string)
+		aop := stk[len(stk)-1].(*Operand)
+		rule := unopRules[opcode]
+		fn := rule.op.(func(interface{}) interface{})
+		rank := rule.priority
+		sym1 := rule.prefix
+		sym2 := rule.suffix
 
 		otext := sym1
-		if aop.Rank < rank {
+		if aop._rank < rank {
 			otext += "("
 		}
-		otext += aop.Text
-		if aop.Rank < rank {
+		otext += aop.text
+		if aop._rank < rank {
 			otext += ")"
 		}
 		otext += sym2
 
-		val := aop.Value
+		val := aop.value
 		if val != nil {
-			if fval, ok := val.(float64); ok {
-				val = fn(fval)
-			}
+			val = fn(val)
 		}
-		stack = append(stack, NewOperand(resultKind, val, rank, otext))
+		res := &Operand{kind: resultType, value: val, _rank: rank, text: otext}
+		stk = stk[:len(stk)-1]
+		stk = append(stk, res)
+	}
+
+	notInNameFormula := func(opArg int, onameArg string) {
+		msg := fmt.Sprintf("ERROR *** Token 0x%02x (%s) found in NAME formula", opArg, onameArg)
+		panic(msg)
 	}
 
 	if fmlalen == 0 {
-		return unkOpnd
+		stack = []interface{}{unkOpnd}
 	}
 
 	for pos < fmlalen {
-		if pos >= len(data) {
-			break
-		}
-
 		op := int(data[pos])
 		opcode := op & 0x1f
 		optype := (op & 0x60) >> 5
@@ -1405,615 +1488,1483 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah, level int) *Oper
 		if optype != 0 {
 			opx = opcode + 32
 		}
+		oname := onames[opx]
+		sz := sztab[opx]
 
-		oname := "?"
-		if opx < len(onames) {
-			oname = onames[opx]
-		}
-
-		sz := -1
-		if opx < len(sztab) {
-			sz = sztab[opx]
-		}
-
-		if blah != 0 && bk.logfile != nil {
+		if blah != 0 {
 			fmt.Fprintf(bk.logfile, "Pos:%d Op:0x%02x Name:%s Sz:%d opcode:%02xh optype:%02xh\n",
 				pos, op, oname, sz, opcode, optype)
-			fmt.Fprintf(bk.logfile, "Stack: %v\n", stack)
+			fmt.Fprintf(bk.logfile, "Stack = %v\n", stack)
 		}
 
 		if sz == -2 {
-			return NewOperand(oERR, nil, 0, "#INVALID_TOKEN!")
+			msg := fmt.Sprintf(`ERROR *** Unexpected token 0x%02x ("%s"); biff_version=%d`, op, oname, bv)
+			panic(msg)
 		}
 
 		if optype == 0 {
-			switch opcode {
-			case 0x00: // tExp
-				if bv >= 30 {
-					// TODO: Handle tExp for BIFF >= 30
-					pos += sz
-					continue
-				} else {
-					// TODO: Handle tExp for BIFF < 30
-					pos += sz
-					continue
-				}
-			case 0x01: // tTbl
-				// Not allowed in name formulas
-				return errorOpnd
-			case 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E: // binary ops
+			if 0x00 <= opcode && opcode <= 0x02 { // unk_opnd, tExp, tTbl
+				notInNameFormula(op, oname)
+			} else if 0x03 <= opcode && opcode <= 0x0E { // Add, Sub, Mul, Div, Power, tConcat, tLT, ..., tNE
 				doBinop(opcode, stack)
-			case 0x0F: // tIsect
-				// TODO: Implement intersection
-				pos += sz
-				continue
-			case 0x10: // tUnion/List
-				// TODO: Implement union
-				pos += sz
-				continue
-			case 0x11: // tRange
-				// TODO: Implement range
-				pos += sz
-				continue
-			case 0x12: // tUplus
-				doUnaryop(0x12, oNUM, stack)
-			case 0x13: // tUminus
-				doUnaryop(0x13, oNUM, stack)
-			case 0x14: // tPercent
-				doUnaryop(0x14, oNUM, stack)
-			case 0x15: // tParen
-				if len(stack) > 0 {
-					aop := stack[len(stack)-1]
-					stack = stack[:len(stack)-1]
-					otext := "(" + aop.Text + ")"
-					stack = append(stack, NewOperand(aop.Kind, aop.Value, FUNC_RANK, otext))
+			} else if opcode == 0x0F { // tIsect
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tIsect pre %v\n", stack)
 				}
-			case 0x16: // tMissArg
-				stack = append(stack, NewOperand(oMSNG, nil, LEAF_RANK, ""))
-			case 0x17: // tStr
-				// TODO: Parse string
-				pos += sz
-				continue
-			case 0x18: // tExtended
-				// TODO: Handle extended token
-				pos += sz
-				continue
-			case 0x19: // tAttr
-				// TODO: Handle attributes
-				pos += sz
-				continue
-			case 0x1A: // tSheet
-				// TODO: Handle sheet reference
-				pos += sz
-				continue
-			case 0x1B: // tEndSheet
-				// TODO: Handle end sheet
-				pos += sz
-				continue
-			case 0x1C: // tErr
-				// TODO: Parse error code
-				pos += sz
-				continue
-			case 0x1D: // tBool
-				// TODO: Parse boolean
-				pos += sz
-				continue
-			case 0x1E: // tInt
-				// TODO: Parse integer
-				pos += sz
-				continue
-			case 0x1F: // tNum
-				// TODO: Parse number
-				pos += sz
-				continue
-			default:
-				pos += sz
-				continue
+				if len(stack) < 2 {
+					continue
+				}
+				bop := stack[len(stack)-1].(*Operand)
+				aop := stack[len(stack)-2].(*Operand)
+				sym := " "
+				rank := 80
+				otext := ""
+				if aop._rank < rank {
+					otext += "("
+				}
+				otext += aop.text
+				if aop._rank < rank {
+					otext += ")"
+				}
+				otext += sym
+				if bop._rank < rank {
+					otext += "("
+				}
+				otext += bop.text
+				if bop._rank < rank {
+					otext += ")"
+				}
+
+				res := &Operand{kind: oREF}
+				res.text = otext
+				if bop.kind == oERR || aop.kind == oERR {
+					res.kind = oERR
+				} else if bop.kind == oUNK || aop.kind == oUNK {
+					// This can happen with undefined (go search in the current sheet) labels.
+					// For example =Bob Sales
+					// Each label gets a NAME record with an empty formula (!)
+					// Evaluation of the tName token classifies it as oUNK
+					// res.kind = oREF
+				} else if bop.kind == oREF && aop.kind == oREF {
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tIsectFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						res.value = []*Ref3D{NewRef3D(coords...)}
+					}
+				} else if bop.kind == oREL && aop.kind == oREL {
+					res.kind = oREL
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tIsectFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						relfa := aop.value.([]*Ref3D)[0].relflags
+						relfb := bop.value.([]*Ref3D)[0].relflags
+						if relfa != nil && relfb != nil && reflect.DeepEqual(relfa, relfb) {
+							relflags := make([]int, len(relfa))
+							copy(relflags, relfa)
+							res.value = []*Ref3D{NewRef3D(append(coords, relflags...)...)}
+						}
+					}
+				}
+				stack = stack[:len(stack)-2]
+				spush(res)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tIsect post %v\n", stack)
+				}
+			} else if opcode == 0x10 { // tList
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tList pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					continue
+				}
+				bop := stack[len(stack)-1].(*Operand)
+				aop := stack[len(stack)-2].(*Operand)
+				sym := ","
+				rank := 80
+				otext := ""
+				if aop._rank < rank {
+					otext += "("
+				}
+				otext += aop.text
+				if aop._rank < rank {
+					otext += ")"
+				}
+				otext += sym
+				if bop._rank < rank {
+					otext += "("
+				}
+				otext += bop.text
+				if bop._rank < rank {
+					otext += ")"
+				}
+
+				res := &Operand{kind: oREF, value: nil, _rank: rank, text: otext}
+				if bop.kind == oERR || aop.kind == oERR {
+					res.kind = oERR
+				} else if (bop.kind == oREF || bop.kind == oREL) && (aop.kind == oREF || aop.kind == oREL) {
+					res.kind = oREF
+					if aop.kind == oREL || bop.kind == oREL {
+						res.kind = oREL
+					}
+					if aop.value != nil && bop.value != nil {
+						aopVal := aop.value.([]*Ref3D)
+						bopVal := bop.value.([]*Ref3D)
+						assert(len(aopVal) >= 1)
+						assert(len(bopVal) == 1)
+						res.value = append(aopVal, bopVal...)
+					}
+				}
+				stack = stack[:len(stack)-2]
+				spush(res)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tList post %v\n", stack)
+				}
+			} else if opcode == 0x11 { // tRange
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRange pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					continue
+				}
+				bop := stack[len(stack)-1].(*Operand)
+				aop := stack[len(stack)-2].(*Operand)
+				sym := ":"
+				rank := 80
+				otext := ""
+				if aop._rank < rank {
+					otext += "("
+				}
+				otext += aop.text
+				if aop._rank < rank {
+					otext += ")"
+				}
+				otext += sym
+				if bop._rank < rank {
+					otext += "("
+				}
+				otext += bop.text
+				if bop._rank < rank {
+					otext += ")"
+				}
+
+				res := &Operand{kind: oREF, value: nil, _rank: rank, text: otext}
+				if bop.kind == oERR || aop.kind == oERR {
+					res.kind = oERR
+				} else if bop.kind == oREF && aop.kind == oREF {
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tRangeFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						res.value = []*Ref3D{NewRef3D(coords...)}
+					}
+				} else if bop.kind == oREL && aop.kind == oREL {
+					res.kind = oREL
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tRangeFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						relfa := aop.value.([]*Ref3D)[0].relflags
+						relfb := bop.value.([]*Ref3D)[0].relflags
+						if relfa != nil && relfb != nil && reflect.DeepEqual(relfa, relfb) {
+							relflags := make([]int, len(relfa))
+							copy(relflags, relfa)
+							res.value = []*Ref3D{NewRef3D(append(coords, relflags...)...)}
+						}
+					}
+				}
+				stack = stack[:len(stack)-2]
+				spush(res)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRange post %v\n", stack)
+				}
+			} else if 0x12 <= opcode && opcode <= 0x14 { // tUplus, tUminus, tPercent
+				doUnaryop(opcode, oNUM, stack)
+			} else if opcode == 0x15 { // tParen
+				// source cosmetics
+			} else if opcode == 0x16 { // tMissArg
+				spush(&Operand{kind: oMSNG, value: nil, _rank: LeafRank, text: ""})
+			} else if opcode == 0x17 { // tStr
+				var strg string
+				var newpos int
+				if bv <= 70 {
+					strg, newpos = unpackStringUpdatePos(data, pos+1, bk.Encoding, 1)
+				} else {
+					strg, newpos = unpackUnicodeUpdatePos(data, pos+1, 1)
+				}
+				sz = newpos - pos
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "   sz=%d strg=%q\n", sz, strg)
+				}
+				text := "\"" + strings.ReplaceAll(strg, "\"", "\"\"") + "\""
+				spush(&Operand{kind: oSTRG, value: strg, _rank: LeafRank, text: text})
+			} else if opcode == 0x18 { // tExtended
+				// new with BIFF 8
+				panic("tExtended token not implemented")
+			} else if opcode == 0x19 { // tAttr
+				result, err := unpack("<BH", data[pos+1:pos+4])
+				if err != nil {
+					panic(err)
+				}
+				values := result.([]interface{})
+				subop := values[0].(uint8)
+				nc := values[1].(uint16)
+				subname := tAttrNames[int(subop)]
+				if subop == 0x04 { // Choose
+					sz = int(nc)*2 + 6
+				} else if subop == 0x10 { // Sum (single arg)
+					sz = 4
+					if blah != 0 {
+						fmt.Fprintf(bk.logfile, "tAttrSum %v\n", stack)
+					}
+					if len(stack) >= 1 {
+						aop := stack[len(stack)-1].(*Operand)
+						otext := "SUM(" + aop.text + ")"
+						stack[len(stack)-1] = &Operand{kind: oNUM, value: nil, _rank: FuncRank, text: otext}
+					}
+				} else {
+					sz = 4
+				}
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "   subop=%02xh subname=%s sz=%d nc=%02xh\n", subop, subname, sz, nc)
+				}
+			} else if 0x1A <= opcode && opcode <= 0x1B { // tSheet, tEndSheet
+				assert(bv < 50)
+				panic("tSheet & tEndsheet tokens not implemented")
+			} else if 0x1C <= opcode && opcode <= 0x1F { // tErr, tBool, tInt, tNum
+				inx := opcode - 0x1C
+				nb := []int{1, 1, 2, 8}[inx]
+				kind := []int{oERR, oBOOL, oNUM, oNUM}[inx]
+				value, _ := unpack([]string{"<B", "<B", "<H", "<d"}[inx], data[pos+1:pos+1+nb])
+				var text string
+				if inx == 2 { // tInt
+					value = float64(value.(int16))
+					text = fmt.Sprintf("%v", value)
+				} else if inx == 3 { // tNum
+					text = fmt.Sprintf("%v", value)
+				} else if inx == 1 { // tBool
+					if value.(uint8) != 0 {
+						text = "TRUE"
+					} else {
+						text = "FALSE"
+					}
+				} else {
+					text = "\"" + errorTextFromCode[int(value.(uint8))] + "\""
+				}
+				spush(&Operand{kind: kind, value: value, _rank: LeafRank, text: text})
+			} else {
+				panic(fmt.Sprintf("Unhandled opcode: 0x%02x", opcode))
 			}
-		} else {
-			// Handle RVA (Reference, Value, Array) tokens
-			switch opx {
-			case 0x20: // tArray
-				// TODO: Parse array
-				pos += sz
-				continue
-			case 0x21: // tFunc
-				// TODO: Parse function
-				pos += sz
-				continue
-			case 0x22: // tFuncVar
-				// TODO: Parse variable function
-				pos += sz
-				continue
-			case 0x23: // tName
-				// TODO: Parse name reference
-				pos += sz
-				continue
-			case 0x24: // tRef
-				// TODO: Parse cell reference
-				pos += sz
-				continue
-			case 0x25: // tArea
-				// TODO: Parse area reference
-				pos += sz
-				continue
-			case 0x26: // tMemArea
-				// TODO: Parse memory area
-				pos += sz
-				continue
-			case 0x27: // tMemErr
-				// TODO: Parse memory error
-				pos += sz
-				continue
-			case 0x28: // tMemNoMem
-				// TODO: Parse no memory
-				pos += sz
-				continue
-			case 0x29: // tMemFunc
-				// TODO: Parse memory function
-				pos += sz
-				continue
-			case 0x2A: // tRefErr
-				// TODO: Parse reference error
-				pos += sz
-				continue
-			case 0x2B: // tAreaErr
-				// TODO: Parse area error
-				pos += sz
-				continue
-			case 0x2C: // tRefN
-				// TODO: Parse relative reference
-				pos += sz
-				continue
-			case 0x2D: // tAreaN
-				// TODO: Parse relative area
-				pos += sz
-				continue
-			case 0x2E: // tMemAreaN
-				// TODO: Parse relative memory area
-				pos += sz
-				continue
-			case 0x2F: // tMemNoMemN
-				// TODO: Parse relative no memory
-				pos += sz
-				continue
-			case 0x39: // tNameX
-				// TODO: Parse external name
-				pos += sz
-				continue
-			case 0x3A: // tRef3d
-				// TODO: Parse 3D reference
-				pos += sz
-				continue
-			case 0x3B: // tArea3d
-				// TODO: Parse 3D area
-				pos += sz
-				continue
-			case 0x3C: // tRefErr3d
-				// TODO: Parse 3D reference error
-				pos += sz
-				continue
-			case 0x3D: // tAreaErr3d
-				// TODO: Parse 3D area error
-				pos += sz
-				continue
-			default:
-				pos += sz
-				continue
+			if sz <= 0 {
+				panic(fmt.Sprintf("Size not set for opcode 0x%02x", opcode))
 			}
+			pos += sz
+			continue
 		}
 
+		if opcode == 0x00 { // tArray
+			spush(unkOpnd)
+		} else if opcode == 0x01 { // tFunc
+			nb := 1
+			if bv >= 40 {
+				nb = 2
+			}
+			funcx, _ := unpack(fmt.Sprintf("<%sH", []string{"", "B"}[nb-1]), data[pos+1:pos+1+nb])
+			funcAttrs, ok := funcDefs[funcx.(int)]
+			if !ok {
+				fmt.Fprintf(bk.logfile, "*** formula/tFunc unknown FuncID:%d\n", funcx)
+				spush(unkOpnd)
+			} else {
+				funcName := funcAttrs.name
+				nargs := funcAttrs.minArgs
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "    FuncID=%d name=%s nargs=%d\n", funcx, funcName, nargs)
+				}
+				assert(len(stack) >= nargs)
+				var otext string
+				if nargs > 0 {
+					argtext := make([]string, nargs)
+					for i := 0; i < nargs; i++ {
+						argtext[i] = stack[len(stack)-nargs+i].(*Operand).text
+					}
+					otext = funcName + "(" + strings.Join(argtext, listsep) + ")"
+					for i := 0; i < nargs; i++ {
+						stack = stack[:len(stack)-1]
+					}
+				} else {
+					otext = funcName + "()"
+				}
+				res := &Operand{kind: oUNK, value: nil, _rank: FuncRank, text: otext}
+				spush(res)
+			}
+		} else if opcode == 0x02 { // tFuncVar
+			nb := 1
+			if bv >= 40 {
+				nb = 2
+			}
+			nargs_funcx, _ := unpack(fmt.Sprintf("<B%sH", []string{"", "B"}[nb-1]), data[pos+1:pos+2+nb])
+			nargs := nargs_funcx.([]interface{})[0].(uint8)
+			funcx := nargs_funcx.([]interface{})[1].(uint16)
+			prompt := nargs >> 7
+			nargs &= 0x7F
+			macro := funcx >> 15
+			funcx &= 0x7FFF
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   FuncID=%d nargs=%d macro=%d prompt=%d\n", funcx, nargs, macro, prompt)
+			}
+			funcAttrs, ok := funcDefs[int(funcx)]
+			if !ok {
+				fmt.Fprintf(bk.logfile, "*** formula/tFuncVar unknown FuncID:%d\n", funcx)
+				spush(unkOpnd)
+			} else {
+				funcName := funcAttrs.name
+				minargs := funcAttrs.minArgs
+				maxargs := funcAttrs.maxArgs
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "    name: %s, min~max args: %d~%d\n", funcName, minargs, maxargs)
+				}
+				assert(minargs <= int(nargs) && int(nargs) <= maxargs)
+				assert(len(stack) >= int(nargs))
+				assert(len(stack) >= int(nargs))
+				argtext := make([]string, nargs)
+				for i := 0; i < int(nargs); i++ {
+					argtext[i] = stack[len(stack)-int(nargs)+i].(*Operand).text
+				}
+				otext := funcName + "(" + strings.Join(argtext, listsep) + ")"
+				res := &Operand{kind: oUNK, value: nil, _rank: FuncRank, text: otext}
+				if funcx == 1 { // IF
+					testarg := stack[len(stack)-int(nargs)].(*Operand)
+					if testarg.kind != oNUM && testarg.kind != oBOOL {
+						if blah != 0 && testarg.kind != oUNK {
+							fmt.Fprintf(bk.logfile, "IF testarg kind?\n")
+						}
+					} else if testarg.value != 0 && testarg.value != 1 {
+						if blah != 0 && testarg.value != nil {
+							fmt.Fprintf(bk.logfile, "IF testarg value?\n")
+						}
+					} else {
+						if int(nargs) == 2 && testarg.value == 0 {
+							// IF(FALSE, tv) => FALSE
+							res.kind = oBOOL
+							res.value = 0
+						} else {
+							respos := len(stack) - int(nargs) + 2 - int(testarg.value.(int))
+							chosen := stack[respos].(*Operand)
+							if chosen.kind == oMSNG {
+								res.kind = oNUM
+								res.value = 0
+							} else {
+								res.kind = chosen.kind
+								res.value = chosen.value
+							}
+							if blah != 0 {
+								fmt.Fprintf(bk.logfile, "$$$$$$ IF => constant\n")
+							}
+						}
+					}
+				} else if funcx == 100 { // CHOOSE
+					testarg := stack[len(stack)-int(nargs)].(*Operand)
+					if testarg.kind == oNUM {
+						if 1 <= testarg.value.(int) && testarg.value.(int) < int(nargs) {
+							chosen := stack[len(stack)-int(nargs)+testarg.value.(int)].(*Operand)
+							if chosen.kind == oMSNG {
+								res.kind = oNUM
+								res.value = 0
+							} else {
+								res.kind = chosen.kind
+								res.value = chosen.value
+							}
+						}
+					}
+				}
+				for i := 0; i < int(nargs); i++ {
+					stack = stack[:len(stack)-1]
+				}
+				spush(res)
+			}
+		} else if opcode == 0x03 { // tName
+			tgtnamex_raw, _ := unpack("<H", data[pos+1:pos+3])
+			tgtnamex := int(tgtnamex_raw.(uint16)) - 1
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   tgtnamex=%d\n", tgtnamex)
+			}
+			tgtobj := bk.NameObjList[tgtnamex]
+			if !tgtobj.Evaluated {
+				// recursive
+				evaluateNameFormula(bk, tgtobj, tgtnamex, blah, level+1)
+			}
+			var res *Operand
+			if tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0 {
+				if blah != 0 {
+					tgtobj.Dump(bk.logfile, "!!! tgtobj has problems!!!", "-----------       --------", 0)
+				}
+				res = &Operand{kind: oUNK, value: nil}
+				anyErr = boolToInt(anyErr != 0 || tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0)
+				anyRel = boolToInt(anyRel != 0 || tgtobj.AnyRel != 0)
+			} else {
+				assert(len(tgtobj.Stack) == 1)
+				res = copyOperand(tgtobj.Stack[0])
+			}
+			res._rank = LeafRank
+			if tgtobj.Scope == -1 {
+				res.text = tgtobj.Name
+			} else {
+				res.text = bk.SheetNames()[tgtobj.Scope] + "!" + tgtobj.Name
+			}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "    tName: setting text to %q\n", res.text)
+			}
+			spush(res)
+		} else if opcode == 0x04 { // tRef
+			// not_in_name_formula(op, oname)
+			rowx, colx, rowRel, colRel := getCellAddr(data, pos+1, bv, reldelta, nil, nil)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  (%d, %d, %d, %d)\n", rowx, colx, rowRel, colRel)
+			}
+			shx1 := 0
+			shx2 := 0 // N.B. relative to the CURRENT SHEET
+			anyRel = 1
+			coords := []int{shx1, shx2 + 1, rowx, rowx + 1, colx, colx + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			if optype == 1 {
+				relflags := []int{1, 1, rowRel, rowRel, colRel, colRel}
+				resOp = &Operand{kind: oREL, value: []*Ref3D{NewRef3D(append(coords, relflags...)...)}}
+			}
+			spush(resOp)
+		} else if opcode == 0x05 { // tArea
+			// not_in_name_formula(op, oname)
+			res1, res2 := getCellRangeAddr(data, pos+1, bv, reldelta, nil, nil)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  %v %v\n", res1, res2)
+			}
+			rowx1, colx1, rowRel1, colRel1 := res1[0], res1[1], res1[2], res1[3]
+			rowx2, colx2, rowRel2, colRel2 := res2[0], res2[1], res2[2], res2[3]
+			shx1 := 0
+			shx2 := 0 // N.B. relative to the CURRENT SHEET
+			anyRel = 1
+			coords := []int{shx1, shx2 + 1, rowx1, rowx2 + 1, colx1, colx2 + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			if optype == 1 {
+				relflags := []int{1, 1, rowRel1, rowRel2, colRel1, colRel2}
+				resOp = &Operand{kind: oREL, value: []*Ref3D{NewRef3D(append(coords, relflags...)...)}}
+			}
+			spush(resOp)
+		} else if opcode == 0x06 { // tMemArea
+			notInNameFormula(op, oname)
+		} else if opcode == 0x09 { // tMemFunc
+			nb, _ := unpack("<H", data[pos+1:pos+3])
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  %d bytes of cell ref formula\n", nb)
+			}
+			// no effect on stack
+		} else if opcode == 0x0C { // tRefN
+			notInNameFormula(op, oname)
+		} else if opcode == 0x0D { // tAreaN
+			notInNameFormula(op, oname)
+		} else if opcode == 0x1A { // tRef3d
+			var refx int
+			var rowx, colx, rowRel, colRel int
+			var shx1, shx2 int
+			if bv >= 80 {
+				rowx, colx, rowRel, colRel = getCellAddr(data, pos+3, bv, reldelta, nil, nil)
+				refx_raw, _ := unpack("<H", data[pos+1:pos+3])
+				refx = int(refx_raw.(uint16))
+				shx1, shx2 = getExternsheetLocalRange(bk, refx, blah)
+			} else {
+				rowx, colx, rowRel, colRel = getCellAddr(data, pos+15, bv, reldelta, nil, nil)
+				result, _ := unpack("<hxxxxxxxxhh", data[pos+1:pos+15])
+				values := result.([]interface{})
+				rawExtshtx := values[0].(int16)
+				rawShx1 := values[1].(int16)
+				rawShx2 := values[2].(int16)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRef3d %d %d %d\n", rawExtshtx, rawShx1, rawShx2)
+				}
+				shx1, shx2 = getExternsheetLocalRangeB57(bk, int(rawExtshtx), int(rawShx1), int(rawShx2), blah)
+			}
+			isRel := rowRel != 0 || colRel != 0
+			anyRel = boolToInt(anyRel != 0 || isRel)
+			coords := []int{shx1, shx2 + 1, rowx, rowx + 1, colx, colx + 1}
+			anyErr = boolToInt(anyErr != 0 || shx1 < -1)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			var ref3d *Ref3D
+			if isRel {
+				relflags := []int{0, 0, rowRel, rowRel, colRel, colRel}
+				ref3d = NewRef3D(append(coords, relflags...)...)
+				resOp.kind = oREL
+				resOp.text = rangename3drel(bk, ref3d, 1)
+			} else {
+				ref3d = NewRef3D(coords...)
+				resOp.kind = oREF
+				resOp.text = rangename3d(bk, ref3d)
+			}
+			resOp._rank = LeafRank
+			if optype == 1 {
+				resOp.value = []*Ref3D{ref3d}
+			}
+			spush(resOp)
+		} else if opcode == 0x1B { // tArea3d
+			var refx int
+			var res1, res2 [4]int
+			var shx1, shx2 int
+			if bv >= 80 {
+				res1, res2 = getCellRangeAddr(data, pos+3, bv, reldelta, nil, nil)
+				refx_raw, _ := unpack("<H", data[pos+1:pos+3])
+				refx = int(refx_raw.(uint16))
+				shx1, shx2 = getExternsheetLocalRange(bk, refx, blah)
+			} else {
+				res1, res2 = getCellRangeAddr(data, pos+15, bv, reldelta, nil, nil)
+				result, _ := unpack("<hxxxxxxxxhh", data[pos+1:pos+15])
+				values := result.([]interface{})
+				rawExtshtx := values[0].(int16)
+				rawShx1 := values[1].(int16)
+				rawShx2 := values[2].(int16)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tArea3d %d %d %d\n", rawExtshtx, rawShx1, rawShx2)
+				}
+				shx1, shx2 = getExternsheetLocalRangeB57(bk, int(rawExtshtx), int(rawShx1), int(rawShx2), blah)
+			}
+			anyErr = boolToInt(anyErr != 0 || shx1 < -1)
+			rowx1, colx1, rowRel1, colRel1 := res1[0], res1[1], res1[2], res1[3]
+			rowx2, colx2, rowRel2, colRel2 := res2[0], res2[1], res2[2], res2[3]
+			isRel := rowRel1 != 0 || colRel1 != 0 || rowRel2 != 0 || colRel2 != 0
+			anyRel = boolToInt(anyRel != 0 || isRel)
+			coords := []int{shx1, shx2 + 1, rowx1, rowx2 + 1, colx1, colx2 + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			var ref3d *Ref3D
+			if isRel {
+				relflags := []int{0, 0, rowRel1, rowRel2, colRel1, colRel2}
+				ref3d = NewRef3D(append(coords, relflags...)...)
+				resOp.kind = oREL
+				resOp.text = rangename3drel(bk, ref3d, 1)
+			} else {
+				ref3d = NewRef3D(coords...)
+				resOp.kind = oREF
+				resOp.text = rangename3d(bk, ref3d)
+			}
+			resOp._rank = LeafRank
+			if optype == 1 {
+				resOp.value = []*Ref3D{ref3d}
+			}
+			spush(resOp)
+		} else if opcode == 0x19 { // tNameX
+			dodgy := 0
+			res := &Operand{kind: oUNK, value: nil}
+			var refx, tgtnamex, origrefx int
+			if bv >= 80 {
+				result, _ := unpack("<HH", data[pos+1:pos+5])
+				values := result.([]interface{})
+				refx = int(values[0].(uint16))
+				tgtnamex = int(values[1].(uint16)) - 1
+				origrefx = refx
+			} else {
+				result, _ := unpack("<hxxxxxxxxH", data[pos+1:pos+13])
+				values := result.([]interface{})
+				refx := int(values[0].(int16))
+				tgtnamex = int(values[1].(uint16)) - 1
+				origrefx = refx
+				if refx > 0 {
+					refx -= 1
+				} else if refx < 0 {
+					refx = -refx - 1
+				} else {
+					dodgy = 1
+				}
+			}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   origrefx=%d refx=%d tgtnamex=%d dodgy=%d\n", origrefx, refx, tgtnamex, dodgy)
+			}
+			if tgtnamex == namex {
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "!!!! Self-referential !!!!\n")
+				}
+				dodgy = boolToInt(anyErr != 0 || true)
+			}
+			if dodgy == 0 {
+				var shx1, _ int
+				if bv >= 80 {
+					shx1, _ = getExternsheetLocalRange(bk, refx, blah)
+				} else if origrefx > 0 {
+					shx1, _ = -4, -4 // external ref
+				} else {
+					exty := bk.externsheetTypeB57[refx]
+					if exty == 4 { // non-specific sheet in own doc't
+						shx1, _ = -1, -1 // internal, any sheet
+					} else {
+						shx1, _ = -666, -666
+					}
+				}
+				if dodgy != 0 || shx1 < -1 {
+					otext := fmt.Sprintf("<<Name #%d in external(?) file #%d>>", tgtnamex, origrefx)
+					res = &Operand{kind: oUNK, value: nil, _rank: LeafRank, text: otext}
+				} else {
+					tgtobj := bk.NameObjList[tgtnamex]
+					if !tgtobj.Evaluated {
+						// recursive
+						evaluateNameFormula(bk, tgtobj, tgtnamex, blah, level+1)
+					}
+					if tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0 {
+						if blah != 0 {
+							tgtobj.Dump(bk.logfile, "!!! bad tgtobj !!!", "------------------", 0)
+						}
+						res = &Operand{kind: oUNK, value: nil}
+						anyErr = boolToInt(anyErr != 0 || tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0)
+						anyRel = boolToInt(anyRel != 0 || tgtobj.AnyRel != 0)
+					} else {
+						assert(len(tgtobj.Stack) == 1)
+						res = copyOperand(tgtobj.Stack[0])
+					}
+					res._rank = LeafRank
+					if tgtobj.Scope == -1 {
+						res.text = tgtobj.Name
+					} else {
+						res.text = bk.SheetNames()[tgtobj.Scope] + "!" + tgtobj.Name
+					}
+					if blah != 0 {
+						fmt.Fprintf(bk.logfile, "    tNameX: setting text to %q\n", res.text)
+					}
+				}
+			}
+			spush(res)
+		} else if _, ok := errorOpcodes[opcode]; ok {
+			anyErr = 1
+			spush(errorOpnd)
+		} else {
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "FORMULA: /// Not handled yet: t%s\n", oname)
+			}
+			anyErr = 1
+		}
 		if sz <= 0 {
-			sz = 1 // Minimum size
+			panic("Fatal: token size is not positive")
 		}
 		pos += sz
 	}
 
-	if len(stack) == 0 {
-		return unkOpnd
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "End of formula. level=%d any_rel=%d any_err=%d stack=%v\n",
+			level, anyRel, anyErr, stack)
+		if len(stack) >= 2 {
+			fmt.Fprintf(bk.logfile, "*** Stack has unprocessed args\n")
+		}
+		fmt.Fprintf(bk.logfile, "\n")
 	}
-
-	result := stack[len(stack)-1]
-	if anyErr != 0 {
-		return errorOpnd
+	nobj.Stack = make([]*Operand, len(stack))
+	for i, op := range stack {
+		nobj.Stack[i] = op.(*Operand)
 	}
-
-	return result
+	if len(stack) != 1 {
+		nobj.Result = nil
+	} else {
+		nobj.Result = stack[0]
+	}
+	nobj.AnyRel = anyRel
+	nobj.AnyErr = anyErr
+	nobj.AnyExternal = anyExternal
+	nobj.Evaluated = true
 }
 
-// Formula parsing constants and dictionaries
-
-var (
-	// Size tables for different BIFF versions
-	sztab0 = []int{-2, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, 8, 4, 2, 2, 3, 9, 8, 2, 3, 8, 4, 7, 5, 5, 5, 2, 4, 7, 4, 7, 2, 2, -2, -2, -2, -2, -2, -2, -2, -2, 3, -2, -2, -2, -2, -2, -2, -2}
-	sztab1 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, 11, 5, 2, 2, 3, 9, 9, 2, 3, 11, 4, 7, 7, 7, 7, 3, 4, 7, 4, 7, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, 3, -2, -2, -2, -2, -2, -2, -2}
-	sztab2 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, 11, 5, 2, 2, 3, 9, 9, 3, 4, 11, 4, 7, 7, 7, 7, 3, 4, 7, 4, 7, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2, -2}
-	sztab3 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -2, -1, -2, -2, 2, 2, 3, 9, 9, 3, 4, 15, 4, 7, 7, 7, 7, 3, 4, 7, 4, 7, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, -2, 25, 18, 21, 18, 21, -2, -2}
-	sztab4 = []int{-2, 5, 5, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -2, -2, 2, 2, 3, 9, 9, 3, 4, 5, 5, 9, 7, 7, 7, 3, 5, 9, 5, 9, 3, 3, -2, -2, -2, -2, -2, -2, -2, -2, -2, 7, 7, 11, 7, 11, -2, -2}
-
-	// Size dictionary mapping BIFF version to size table
-	szdict = map[int][]int{
-		20: sztab0,
-		21: sztab0,
-		30: sztab1,
-		40: sztab2,
-		45: sztab2,
-		50: sztab3,
-		70: sztab3,
-		80: sztab4,
+// decompileFormula decompiles a formula
+func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, bcolx interface{}, blah int, level int, r1c1 int) string {
+	if level > StackAlarmLevel {
+		blah = 1
+	}
+	reldelta := 0
+	if fmlatype&(FmlaTypeShared|FmlaTypeName|FmlaTypeCondFmt|FmlaTypeDataVal) != 0 {
+		reldelta = 1
+	}
+	data := fmla
+	bv := bk.BiffVersion
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "::: decompile_formula len=%d fmlatype=%d browx=%v bcolx=%v reldelta=%d r1c1=%d level=%d\n",
+			fmlalen, fmlatype, browx, bcolx, reldelta, r1c1, level)
+		hexCharDump(data, 0, fmlalen, bk.logfile.(*os.File))
+	}
+	if level > StackPanicLevel {
+		panic(fmt.Sprintf("Excessive indirect references in formula"))
+	}
+	sztab := szdict[bv]
+	pos := 0
+	stack := []interface{}{}
+	anyRel := 0
+	anyErr := 0
+	unkOpnd := &Operand{kind: oUNK, value: nil}
+	errorOpnd := &Operand{kind: oERR, value: nil}
+	spush := func(item interface{}) {
+		stack = append(stack, item)
 	}
 
-	// Operation names for debugging
-	onames = []string{
-		"Unk00", "Exp", "Tbl", "Add", "Sub", "Mul", "Div", "Power", "Concat", "LT", "LE", "EQ", "GE", "GT", "NE",
-		"Isect", "List", "Range", "Uplus", "Uminus", "Percent", "Paren", "MissArg", "Str", "Extended", "Attr",
-		"Sheet", "EndSheet", "Err", "Bool", "Int", "Num", "Array", "Func", "FuncVar", "Name", "Ref", "Area",
-		"MemArea", "MemErr", "MemNoMem", "MemFunc", "RefErr", "AreaErr", "RefN", "AreaN", "MemAreaN", "MemNoMemN",
-		"", "", "", "", "", "", "", "", "FuncCE", "NameX", "Ref3d", "Area3d", "RefErr3d", "AreaErr3d", "", "",
+	doBinop := func(opcd int, stk []interface{}) {
+		if len(stk) < 2 {
+			return
+		}
+		bop := stk[len(stk)-1].(*Operand)
+		aop := stk[len(stk)-2].(*Operand)
+		rule := binopRules[opcd]
+		_ = rule.argdict
+		resultType := rule.resultType
+		rank := rule.priority
+		sym := rule.symbol
+
+		otext := ""
+		if aop._rank < rank {
+			otext += "("
+		}
+		otext += aop.text
+		if aop._rank < rank {
+			otext += ")"
+		}
+		otext += sym
+		if bop._rank < rank {
+			otext += "("
+		}
+		otext += bop.text
+		if bop._rank < rank {
+			otext += ")"
+		}
+
+		resop := &Operand{kind: resultType, value: nil, _rank: rank, text: otext}
+		stk = stk[:len(stk)-2]
+		stk = append(stk, resop)
 	}
 
-	// Function definitions: index -> (name, min_args, max_args, flags, known_args, return_type, arg_types)
-	funcDefs = map[int][7]interface{}{
-		0:   {"COUNT", 0, 30, 0x04, 1, "V", "R"},
-		1:   {"IF", 2, 3, 0x04, 3, "V", "VRR"},
-		2:   {"ISNA", 1, 1, 0x02, 1, "V", "V"},
-		3:   {"ISERROR", 1, 1, 0x02, 1, "V", "V"},
-		4:   {"SUM", 0, 30, 0x04, 1, "V", "R"},
-		5:   {"AVERAGE", 1, 30, 0x04, 1, "V", "R"},
-		6:   {"MIN", 1, 30, 0x04, 1, "V", "R"},
-		7:   {"MAX", 1, 30, 0x04, 1, "V", "R"},
-		8:   {"ROW", 0, 1, 0x04, 1, "V", "R"},
-		9:   {"COLUMN", 0, 1, 0x04, 1, "V", "R"},
-		10:  {"NA", 0, 0, 0x02, 0, "V", ""},
-		11:  {"NPV", 2, 30, 0x04, 2, "V", "VR"},
-		12:  {"STDEV", 1, 30, 0x04, 1, "V", "R"},
-		13:  {"DOLLAR", 1, 2, 0x04, 1, "V", "V"},
-		14:  {"FIXED", 2, 3, 0x04, 3, "V", "VVV"},
-		15:  {"SIN", 1, 1, 0x02, 1, "V", "V"},
-		16:  {"COS", 1, 1, 0x02, 1, "V", "V"},
-		17:  {"TAN", 1, 1, 0x02, 1, "V", "V"},
-		18:  {"ATAN", 1, 1, 0x02, 1, "V", "V"},
-		19:  {"PI", 0, 0, 0x02, 0, "V", ""},
-		20:  {"SQRT", 1, 1, 0x02, 1, "V", "V"},
-		21:  {"EXP", 1, 1, 0x02, 1, "V", "V"},
-		22:  {"LN", 1, 1, 0x02, 1, "V", "V"},
-		23:  {"LOG10", 1, 1, 0x02, 1, "V", "V"},
-		24:  {"ABS", 1, 1, 0x02, 1, "V", "V"},
-		25:  {"INT", 1, 1, 0x02, 1, "V", "V"},
-		26:  {"SIGN", 1, 1, 0x02, 1, "V", "V"},
-		27:  {"ROUND", 2, 2, 0x04, 2, "V", "VV"},
-		28:  {"LOOKUP", 2, 3, 0x04, 3, "V", "VRR"},
-		29:  {"INDEX", 2, 4, 0x04, 4, "V", "RVVV"},
-		30:  {"REPT", 2, 2, 0x04, 2, "V", "VV"},
-		31:  {"MID", 3, 3, 0x04, 3, "V", "VVV"},
-		32:  {"LEN", 1, 1, 0x02, 1, "V", "V"},
-		33:  {"VALUE", 1, 1, 0x02, 1, "V", "V"},
-		34:  {"TRUE", 0, 0, 0x02, 0, "V", ""},
-		35:  {"FALSE", 0, 0, 0x02, 0, "V", ""},
-		36:  {"AND", 1, 30, 0x04, 1, "V", "R"},
-		37:  {"OR", 1, 30, 0x04, 1, "V", "R"},
-		38:  {"NOT", 1, 1, 0x02, 1, "V", "V"},
-		39:  {"MOD", 2, 2, 0x04, 2, "V", "VV"},
-		40:  {"DCOUNT", 3, 3, 0x04, 3, "V", "RRR"},
-		41:  {"DSUM", 3, 3, 0x04, 3, "V", "RRR"},
-		42:  {"DAVERAGE", 3, 3, 0x04, 3, "V", "RRR"},
-		43:  {"DMIN", 3, 3, 0x04, 3, "V", "RRR"},
-		44:  {"DMAX", 3, 3, 0x04, 3, "V", "RRR"},
-		45:  {"DSTDEV", 3, 3, 0x04, 3, "V", "RRR"},
-		46:  {"VAR", 1, 30, 0x04, 1, "V", "R"},
-		47:  {"DVAR", 3, 3, 0x04, 3, "V", "RRR"},
-		48:  {"TEXT", 2, 2, 0x04, 2, "V", "VV"},
-		49:  {"LINEST", 1, 4, 0x04, 4, "A", "RRVV"},
-		50:  {"TREND", 1, 4, 0x04, 4, "A", "RRVV"},
-		51:  {"LOGEST", 1, 4, 0x04, 4, "A", "RRVV"},
-		52:  {"GROWTH", 1, 4, 0x04, 4, "A", "RRVV"},
-		57:  {"TRANSPOSE", 1, 1, 0x02, 1, "A", "A"},
-		61:  {"RAND", 0, 0, 0x02, 0, "V", ""},
-		62:  {"MATCH", 2, 3, 0x04, 3, "V", "VRR"},
-		63:  {"DATE", 3, 3, 0x04, 3, "V", "VVV"},
-		64:  {"TIME", 3, 3, 0x04, 3, "V", "VVV"},
-		65:  {"DAY", 1, 1, 0x02, 1, "V", "V"},
-		66:  {"MONTH", 1, 1, 0x02, 1, "V", "V"},
-		67:  {"YEAR", 1, 1, 0x02, 1, "V", "V"},
-		68:  {"WEEKDAY", 1, 2, 0x04, 2, "V", "VV"},
-		69:  {"HOUR", 1, 1, 0x02, 1, "V", "V"},
-		70:  {"MINUTE", 1, 1, 0x02, 1, "V", "V"},
-		71:  {"SECOND", 1, 1, 0x02, 1, "V", "V"},
-		72:  {"NOW", 0, 0, 0x02, 0, "V", ""},
-		73:  {"AREAS", 1, 1, 0x02, 1, "V", "R"},
-		74:  {"ROWS", 1, 1, 0x02, 1, "V", "R"},
-		75:  {"COLUMNS", 1, 1, 0x02, 1, "V", "R"},
-		76:  {"OFFSET", 3, 5, 0x04, 5, "R", "VRVVV"},
-		77:  {"SEARCH", 2, 3, 0x04, 3, "V", "VVV"},
-		78:  {"TRANSPOSE", 1, 1, 0x02, 1, "A", "A"},
-		79:  {"TYPE", 1, 1, 0x02, 1, "V", "V"},
-		82:  {"ATAN2", 2, 2, 0x04, 2, "V", "VV"},
-		83:  {"ASIN", 1, 1, 0x02, 1, "V", "V"},
-		84:  {"ACOS", 1, 1, 0x02, 1, "V", "V"},
-		85:  {"CHOOSE", 2, 30, 0x04, 2, "V", "VR"},
-		86:  {"HLOOKUP", 3, 4, 0x04, 4, "V", "VRRV"},
-		87:  {"VLOOKUP", 3, 4, 0x04, 4, "V", "VRRV"},
-		88:  {"ISREF", 1, 1, 0x02, 1, "V", "R"},
-		89:  {"LOG", 1, 2, 0x04, 2, "V", "VV"},
-		97:  {"CHAR", 1, 1, 0x02, 1, "V", "V"},
-		98:  {"LOWER", 1, 1, 0x02, 1, "V", "V"},
-		99:  {"UPPER", 1, 1, 0x02, 1, "V", "V"},
-		100: {"PROPER", 1, 1, 0x02, 1, "V", "V"},
-		101: {"LEFT", 1, 2, 0x04, 2, "V", "VV"},
-		102: {"RIGHT", 1, 2, 0x04, 2, "V", "VV"},
-		103: {"EXACT", 2, 2, 0x04, 2, "V", "VV"},
-		104: {"TRIM", 1, 1, 0x02, 1, "V", "V"},
-		105: {"REPLACE", 4, 4, 0x04, 4, "V", "VVVV"},
-		106: {"SUBSTITUTE", 3, 4, 0x04, 4, "V", "VVVV"},
-		107: {"CODE", 1, 1, 0x02, 1, "V", "V"},
-		109: {"FIND", 2, 3, 0x04, 3, "V", "VVV"},
-		111: {"ISERR", 1, 1, 0x02, 1, "V", "V"},
-		112: {"ISTEXT", 1, 1, 0x02, 1, "V", "V"},
-		113: {"ISNUMBER", 1, 1, 0x02, 1, "V", "V"},
-		114: {"ISBLANK", 1, 1, 0x02, 1, "V", "V"},
-		115: {"T", 1, 1, 0x02, 1, "V", "R"},
-		116: {"N", 1, 1, 0x02, 1, "V", "R"},
-		117: {"DATEVALUE", 1, 1, 0x02, 1, "V", "V"},
-		118: {"TIMEVALUE", 1, 1, 0x02, 1, "V", "V"},
-		119: {"SLN", 3, 3, 0x04, 3, "V", "VVV"},
-		120: {"SYD", 4, 4, 0x04, 4, "V", "VVVV"},
-		121: {"DDB", 4, 5, 0x04, 5, "V", "VVVVV"},
-		124: {"INDIRECT", 1, 2, 0x04, 2, "R", "VV"},
-		125: {"CALLER", 0, 0, 0x02, 0, "R", ""},
-		126: {"CLEAN", 1, 1, 0x02, 1, "V", "V"},
-		127: {"MDETERM", 1, 1, 0x02, 1, "V", "A"},
-		128: {"MINVERSE", 1, 1, 0x02, 1, "A", "A"},
-		129: {"MMULT", 2, 2, 0x04, 2, "A", "AA"},
-		130: {"IPMT", 4, 6, 0x04, 6, "V", "VVVVVV"},
-		131: {"PPMT", 4, 6, 0x04, 6, "V", "VVVVVV"},
-		132: {"COUNTA", 0, 30, 0x04, 1, "V", "R"},
-		133: {"PRODUCT", 0, 30, 0x04, 1, "V", "R"},
-		134: {"FACT", 1, 1, 0x02, 1, "V", "V"},
-		135: {"DPRODUCT", 3, 3, 0x04, 3, "V", "RRR"},
-		136: {"ISNONTEXT", 1, 1, 0x02, 1, "V", "V"},
-		137: {"STDEVP", 1, 30, 0x04, 1, "V", "R"},
-		138: {"VARP", 1, 30, 0x04, 1, "V", "R"},
-		139: {"DSTDEVP", 3, 3, 0x04, 3, "V", "RRR"},
-		140: {"DVARP", 3, 3, 0x04, 3, "V", "RRR"},
-		141: {"TRUNC", 1, 2, 0x04, 2, "V", "VV"},
-		142: {"ISLOGICAL", 1, 1, 0x02, 1, "V", "V"},
-		143: {"DCOUNTA", 3, 3, 0x04, 3, "V", "RRR"},
-		144: {"FINDB", 2, 3, 0x04, 3, "V", "VVV"},
-		145: {"SEARCHB", 2, 3, 0x04, 3, "V", "VVV"},
-		146: {"REPLACEB", 4, 4, 0x04, 4, "V", "VVVV"},
-		147: {"LEFTB", 1, 2, 0x04, 2, "V", "VV"},
-		148: {"RIGHTB", 1, 2, 0x04, 2, "V", "VV"},
-		149: {"MIDB", 3, 3, 0x04, 3, "V", "VVV"},
-		150: {"LENB", 1, 1, 0x02, 1, "V", "V"},
-		151: {"ROUNDUP", 2, 2, 0x04, 2, "V", "VV"},
-		152: {"ROUNDDOWN", 2, 2, 0x04, 2, "V", "VV"},
-		153: {"ASC", 1, 1, 0x02, 1, "V", "V"},
-		154: {"DBCS", 1, 1, 0x02, 1, "V", "V"},
-		155: {"RANK", 2, 3, 0x04, 3, "V", "VRR"},
-		156: {"ADDRESS", 2, 5, 0x04, 5, "V", "VVVVV"},
-		157: {"DAYS360", 2, 2, 0x04, 2, "V", "VV"},
-		158: {"TODAY", 0, 0, 0x02, 0, "V", ""},
-		159: {"VDB", 5, 7, 0x04, 7, "V", "VVVVVVV"},
-		160: {"MEDIAN", 1, 30, 0x04, 1, "V", "R"},
-		161: {"SUMPRODUCT", 1, 30, 0x04, 1, "V", "A"},
-		162: {"SINH", 1, 1, 0x02, 1, "V", "V"},
-		163: {"COSH", 1, 1, 0x02, 1, "V", "V"},
-		164: {"TANH", 1, 1, 0x02, 1, "V", "V"},
-		165: {"ASINH", 1, 1, 0x02, 1, "V", "V"},
-		166: {"ACOSH", 1, 1, 0x02, 1, "V", "V"},
-		167: {"ATANH", 1, 1, 0x02, 1, "V", "V"},
-		168: {"DGET", 3, 3, 0x04, 3, "V", "RRR"},
-		169: {"INFO", 1, 1, 0x02, 1, "V", "V"},
-		183: {"FREQUENCY", 2, 2, 0x04, 2, "A", "RV"},
-		184: {"ERROR.TYPE", 1, 1, 0x02, 1, "V", "V"},
-		185: {"REGISTER.ID", 2, 3, 0x04, 3, "V", "VVV"},
-		186: {"AVEDEV", 1, 30, 0x04, 1, "V", "R"},
-		187: {"BETADIST", 3, 5, 0x04, 5, "V", "VVVVV"},
-		188: {"GAMMALN", 1, 1, 0x02, 1, "V", "V"},
-		189: {"BETAINV", 3, 5, 0x04, 5, "V", "VVVVV"},
-		190: {"BINOMDIST", 4, 4, 0x04, 4, "V", "VVVV"},
-		191: {"CHIDIST", 2, 2, 0x04, 2, "V", "VV"},
-		192: {"CHIINV", 2, 2, 0x04, 2, "V", "VV"},
-		193: {"COMBIN", 2, 2, 0x04, 2, "V", "VV"},
-		194: {"CONFIDENCE", 3, 3, 0x04, 3, "V", "VVV"},
-		195: {"CRITBINOM", 3, 3, 0x04, 3, "V", "VVV"},
-		196: {"EVEN", 1, 1, 0x02, 1, "V", "V"},
-		197: {"EXPONDIST", 3, 3, 0x04, 3, "V", "VVV"},
-		198: {"FDIST", 3, 3, 0x04, 3, "V", "VV"},
-		199: {"FINV", 3, 3, 0x04, 3, "V", "VV"},
-		200: {"FISHER", 1, 1, 0x02, 1, "V", "V"},
-		201: {"FISHERINV", 1, 1, 0x02, 1, "V", "V"},
-		202: {"FLOOR", 2, 2, 0x04, 2, "V", "VV"},
-		203: {"GAMMADIST", 4, 4, 0x04, 4, "V", "VVVV"},
-		204: {"GAMMAINV", 3, 3, 0x04, 3, "V", "VVV"},
-		205: {"CEILING", 2, 2, 0x04, 2, "V", "VV"},
-		206: {"HYPGEOMDIST", 4, 4, 0x04, 4, "V", "VVVV"},
-		207: {"LOGNORMDIST", 3, 3, 0x04, 3, "V", "VVV"},
-		208: {"LOGINV", 3, 3, 0x04, 3, "V", "VVV"},
-		209: {"NEGBINOMDIST", 3, 3, 0x04, 3, "V", "VVV"},
-		210: {"NORMDIST", 4, 4, 0x04, 4, "V", "VVVV"},
-		211: {"NORMSDIST", 1, 1, 0x02, 1, "V", "V"},
-		212: {"NORMSINV", 1, 1, 0x02, 1, "V", "V"},
-		213: {"NORMINV", 3, 3, 0x04, 3, "V", "VVV"},
-		214: {"PEARSON", 2, 2, 0x04, 2, "V", "AA"},
-		215: {"POISSON", 3, 3, 0x04, 3, "V", "VVV"},
-		216: {"TDIST", 3, 3, 0x04, 3, "V", "VVV"},
-		217: {"TINV", 2, 2, 0x04, 2, "V", "VV"},
-		218: {"WEIBULL", 4, 4, 0x04, 4, "V", "VVVV"},
-		219: {"SUMXMY2", 2, 2, 0x04, 2, "V", "AA"},
-		220: {"SUMX2MY2", 2, 2, 0x04, 2, "V", "AA"},
-		221: {"SUMX2PY2", 2, 2, 0x04, 2, "V", "AA"},
-		222: {"CHITEST", 2, 2, 0x04, 2, "V", "AA"},
-		223: {"CORREL", 2, 2, 0x04, 2, "V", "AA"},
-		224: {"COVAR", 2, 2, 0x04, 2, "V", "AA"},
-		225: {"FTEST", 2, 2, 0x04, 2, "V", "AA"},
-		226: {"INTERCEPT", 2, 2, 0x04, 2, "V", "AA"},
-		227: {"PEARSON", 2, 2, 0x04, 2, "V", "AA"},
-		228: {"RSQ", 2, 2, 0x04, 2, "V", "AA"},
-		229: {"STEYX", 2, 2, 0x04, 2, "V", "AA"},
-		230: {"SLOPE", 2, 2, 0x04, 2, "V", "AA"},
-		231: {"TTEST", 4, 4, 0x04, 4, "V", "AAVV"},
-		232: {"PROB", 3, 4, 0x04, 4, "V", "AAVV"},
-		233: {"DEVSQ", 1, 30, 0x04, 1, "V", "R"},
-		234: {"GEOMEAN", 1, 30, 0x04, 1, "V", "R"},
-		235: {"HARMEAN", 1, 30, 0x04, 1, "V", "R"},
-		236: {"SUMSQ", 1, 30, 0x04, 1, "V", "R"},
-		237: {"KURT", 1, 30, 0x04, 1, "V", "R"},
-		238: {"SKEW", 1, 30, 0x04, 1, "V", "R"},
-		239: {"ZTEST", 2, 3, 0x04, 3, "V", "RVV"},
-		240: {"LARGE", 2, 2, 0x04, 2, "V", "RV"},
-		241: {"SMALL", 2, 2, 0x04, 2, "V", "RV"},
-		242: {"QUARTILE", 2, 2, 0x04, 2, "V", "RV"},
-		243: {"PERCENTILE", 2, 2, 0x04, 2, "V", "RV"},
-		244: {"PERCENTRANK", 2, 3, 0x04, 3, "V", "RVV"},
-		245: {"MODE", 1, 30, 0x04, 1, "V", "R"},
-		246: {"TRIMMEAN", 2, 2, 0x04, 2, "V", "RV"},
-		247: {"TINV2", 2, 2, 0x04, 2, "V", "VV"},
-		252: {"CONCATENATE", 1, 30, 0x04, 1, "V", "V"},
-		253: {"POWER", 2, 2, 0x04, 2, "V", "VV"},
-		254: {"RADIANS", 1, 1, 0x02, 1, "V", "V"},
-		255: {"DEGREES", 1, 1, 0x02, 1, "V", "V"},
-		256: {"SUBTOTAL", 2, 30, 0x04, 2, "V", "VR"},
-		257: {"SUMIF", 2, 3, 0x04, 3, "V", "RRV"},
-		258: {"COUNTIF", 2, 2, 0x04, 2, "V", "RV"},
-		259: {"COUNTBLANK", 1, 1, 0x02, 1, "V", "R"},
-		260: {"ISPMT", 4, 4, 0x04, 4, "V", "VVVV"},
-		261: {"DATEDIF", 3, 3, 0x04, 3, "V", "VVV"},
-		262: {"DATESTRING", 1, 1, 0x02, 1, "V", "V"},
-		263: {"NUMBERSTRING", 2, 2, 0x04, 2, "V", "VV"},
-		269: {"SQRTPI", 1, 1, 0x02, 1, "V", "V"},
-		270: {"RAND", 0, 0, 0x02, 0, "V", ""},
-		271: {"NOW", 0, 0, 0x02, 0, "V", ""},
-		272: {"TODAY", 0, 0, 0x02, 0, "V", ""},
-		273: {"AREAS", 1, 1, 0x02, 1, "V", "R"},
-		274: {"ROWS", 1, 1, 0x02, 1, "V", "R"},
-		275: {"COLUMNS", 1, 1, 0x02, 1, "V", "R"},
-		276: {"OFFSET", 3, 5, 0x04, 5, "R", "VRVVV"},
-		277: {"SEARCH", 2, 3, 0x04, 3, "V", "VVV"},
-		278: {"TRANSPOSE", 1, 1, 0x02, 1, "A", "A"},
-		279: {"TYPE", 1, 1, 0x02, 1, "V", "V"},
-		285: {"CALLER", 0, 0, 0x02, 0, "R", ""},
-		288: {"SERIESSUM", 4, 4, 0x04, 4, "V", "VVVA"},
-		289: {"FACTDOUBLE", 1, 1, 0x02, 1, "V", "V"},
-		290: {"SQRTPI", 1, 1, 0x02, 1, "V", "V"},
-		291: {"RANDBETWEEN", 2, 2, 0x04, 2, "V", "VV"},
-		292: {"PRODUCT", 0, 30, 0x04, 1, "V", "R"},
-		293: {"FACT", 1, 1, 0x02, 1, "V", "V"},
-		294: {"DPRODUCT", 3, 3, 0x04, 3, "V", "RRR"},
-		295: {"ISNONTEXT", 1, 1, 0x02, 1, "V", "V"},
-		296: {"STDEVP", 1, 30, 0x04, 1, "V", "R"},
-		297: {"VARP", 1, 30, 0x04, 1, "V", "R"},
-		298: {"DSTDEVP", 3, 3, 0x04, 3, "V", "RRR"},
-		299: {"DVARP", 3, 3, 0x04, 3, "V", "RRR"},
-		300: {"TRUNC", 1, 2, 0x04, 2, "V", "VV"},
-		301: {"ISLOGICAL", 1, 1, 0x02, 1, "V", "V"},
-		302: {"DCOUNTA", 3, 3, 0x04, 3, "V", "RRR"},
-		303: {"FINDB", 2, 3, 0x04, 3, "V", "VVV"},
-		304: {"SEARCHB", 2, 3, 0x04, 3, "V", "VVV"},
-		305: {"REPLACEB", 4, 4, 0x04, 4, "V", "VVVV"},
-		306: {"LEFTB", 1, 2, 0x04, 2, "V", "VV"},
-		307: {"RIGHTB", 1, 2, 0x04, 2, "V", "VV"},
-		308: {"MIDB", 3, 3, 0x04, 3, "V", "VVV"},
-		309: {"LENB", 1, 1, 0x02, 1, "V", "V"},
-		310: {"ROUNDUP", 2, 2, 0x04, 2, "V", "VV"},
-		311: {"ROUNDDOWN", 2, 2, 0x04, 2, "V", "VV"},
-		312: {"ASC", 1, 1, 0x02, 1, "V", "V"},
-		313: {"DBCS", 1, 1, 0x02, 1, "V", "V"},
-		314: {"RANK", 2, 3, 0x04, 3, "V", "VRR"},
-		315: {"ADDRESS", 2, 5, 0x04, 5, "V", "VVVVV"},
-		316: {"DAYS360", 2, 2, 0x04, 2, "V", "VV"},
-		317: {"TODAY", 0, 0, 0x02, 0, "V", ""},
-		318: {"VDB", 5, 7, 0x04, 7, "V", "VVVVVVV"},
-		319: {"MEDIAN", 1, 30, 0x04, 1, "V", "R"},
-		320: {"SUMPRODUCT", 1, 30, 0x04, 1, "V", "A"},
-		321: {"SINH", 1, 1, 0x02, 1, "V", "V"},
-		322: {"COSH", 1, 1, 0x02, 1, "V", "V"},
-		323: {"TANH", 1, 1, 0x02, 1, "V", "V"},
-		324: {"ASINH", 1, 1, 0x02, 1, "V", "V"},
-		325: {"ACOSH", 1, 1, 0x02, 1, "V", "V"},
-		326: {"ATANH", 1, 1, 0x02, 1, "V", "V"},
-		336: {"ISPMT", 4, 6, 0x04, 6, "V", "VVVVVV"},
-		337: {"DATEDIF", 3, 3, 0x04, 3, "V", "VVV"},
-		338: {"DATESTRING", 1, 1, 0x02, 1, "V", "V"},
-		339: {"NUMBERSTRING", 2, 2, 0x04, 2, "V", "VV"},
-		342: {"SUMSQ", 1, 30, 0x04, 1, "V", "R"},
-		343: {"SUMX2MY2", 2, 2, 0x04, 2, "V", "AA"},
-		344: {"SUMX2PY2", 2, 2, 0x04, 2, "V", "AA"},
-		345: {"SUMXMY2", 2, 2, 0x04, 2, "V", "AA"},
-		346: {"FACTDOUBLE", 1, 1, 0x02, 1, "V", "V"},
-		347: {"SQRTPI", 1, 1, 0x02, 1, "V", "V"},
-		348: {"RANDBETWEEN", 2, 2, 0x04, 2, "V", "VV"},
-		349: {"SERIESSUM", 4, 4, 0x04, 4, "V", "VVVA"},
-		350: {"SUBTOTAL", 2, 30, 0x04, 2, "V", "VR"},
-		351: {"SUMIF", 2, 3, 0x04, 3, "V", "RRV"},
-		352: {"COUNTIF", 2, 2, 0x04, 2, "V", "RV"},
-		353: {"COUNTBLANK", 1, 1, 0x02, 1, "V", "R"},
-		354: {"SCENARIO_GET", 2, 2, 0x04, 2, "V", "VV"},
-		355: {"ISPMT", 4, 4, 0x04, 4, "V", "VVVV"},
-		356: {"DATEDIF", 3, 3, 0x04, 3, "V", "VVV"},
-		357: {"DATESTRING", 1, 1, 0x02, 1, "V", "V"},
-		358: {"NUMBERSTRING", 2, 2, 0x04, 2, "V", "VV"},
-		359: {"ROMAN", 1, 2, 0x04, 2, "V", "VV"},
-		360: {"GETPIVOTDATA", 2, 30, 0x04, 2, "V", "VR"},
-		361: {"HYPERLINK", 1, 2, 0x04, 2, "V", "VV"},
-		362: {"PHONETIC", 1, 1, 0x02, 1, "V", "R"},
-		363: {"AVERAGEA", 1, 30, 0x04, 1, "V", "R"},
-		364: {"MAXA", 1, 30, 0x04, 1, "V", "R"},
-		365: {"MINA", 1, 30, 0x04, 1, "V", "R"},
-		366: {"STDEVPA", 1, 30, 0x04, 1, "V", "R"},
-		367: {"VARPA", 1, 30, 0x04, 1, "V", "R"},
-		368: {"STDEVA", 1, 30, 0x04, 1, "V", "R"},
-		369: {"VARA", 1, 30, 0x04, 1, "V", "R"},
-		370: {"BAHTTEXT", 1, 1, 0x02, 1, "V", "V"},
-		384: {"THAIDAYOFWEEK", 1, 1, 0x02, 1, "V", "V"},
-		385: {"THAIDIGIT", 1, 1, 0x02, 1, "V", "V"},
-		386: {"THAIMONTHOFYEAR", 1, 1, 0x02, 1, "V", "V"},
-		387: {"THAINUMSOUND", 1, 1, 0x02, 1, "V", "V"},
-		388: {"THAINUMSTRING", 1, 1, 0x02, 1, "V", "V"},
-		389: {"THAISTRINGLENGTH", 1, 1, 0x02, 1, "V", "V"},
-		390: {"ISTHAIDIGIT", 1, 1, 0x02, 1, "V", "V"},
-		391: {"ROUNDBAHTDOWN", 1, 1, 0x02, 1, "V", "V"},
-		392: {"ROUNDBAHTUP", 1, 1, 0x02, 1, "V", "V"},
-		393: {"THAIYEAR", 1, 1, 0x02, 1, "V", "V"},
-		394: {"RTD", 2, 30, 0x04, 2, "V", "VV"},
+	doUnaryop := func(opcode int, resultType int, stk []interface{}) {
+		if len(stk) < 1 {
+			return
+		}
+		aop := stk[len(stk)-1].(*Operand)
+		rule := unopRules[opcode]
+		rank := rule.priority
+		sym1 := rule.prefix
+		sym2 := rule.suffix
+
+		otext := sym1
+		if aop._rank < rank {
+			otext += "("
+		}
+		otext += aop.text
+		if aop._rank < rank {
+			otext += ")"
+		}
+		otext += sym2
+
+		res := &Operand{kind: resultType, value: nil, _rank: rank, text: otext}
+		stk = stk[:len(stk)-1]
+		stk = append(stk, res)
 	}
 
-	// Argument conversion dictionaries for binary operations
-	arithArgdict = map[int]func(interface{}) interface{}{
-		oNUM:  nop,
-		oSTRG: func(x interface{}) interface{} { return float64(x.(float64)) }, // identity for float64
+	unexpectedOpcode := func(opArg int, onameArg string) {
+		msg := fmt.Sprintf("ERROR *** Unexpected token 0x%02x (%s) found in formula type %s",
+			opArg, onameArg, fmlaTypeDescrMap[fmlatype])
+		fmt.Fprintf(bk.logfile, "%s\n", msg)
+		// Note: Python version raises FormulaError but we just print and continue
 	}
 
-	cmpArgdict = map[int]func(interface{}) interface{}{
-		oNUM:  nop,
-		oSTRG: nop,
+	if fmlalen == 0 {
+		stack = []interface{}{unkOpnd}
 	}
 
-	strgArgdict = map[int]func(interface{}) interface{}{
-		oNUM:  func(x interface{}) interface{} { return Num2Str(x.(float64)) },
-		oSTRG: nop,
+	for pos < fmlalen {
+		op := int(data[pos])
+		opcode := op & 0x1f
+		optype := (op & 0x60) >> 5
+		opx := opcode
+		if optype != 0 {
+			opx = opcode + 32
+		}
+		oname := onames[opx]
+		sz := sztab[opx]
+
+		if blah != 0 {
+			fmt.Fprintf(bk.logfile, "Pos:%d Op:0x%02x opname:t%s Sz:%d opcode:%02xh optype:%02xh\n",
+				pos, op, oname, sz, opcode, optype)
+			fmt.Fprintf(bk.logfile, "Stack = %v\n", stack)
+		}
+
+		if sz == -2 {
+			msg := fmt.Sprintf(`ERROR *** Unexpected token 0x%02x ("%s"); biff_version=%d`, op, oname, bv)
+			panic(msg)
+		}
+
+		tokenMask := tokenNotAllowed[opx]
+		if tokenMask {
+			unexpectedOpcode(op, oname)
+		}
+
+		if optype == 0 {
+			if opcode <= 0x01 { // tExp
+				var fmtStr string
+				if bv >= 30 {
+					fmtStr = "<x2H"
+				} else {
+					fmtStr = "<xHB"
+				}
+				assert(pos == 0 && fmlalen == sz && len(stack) == 0)
+				result, _ := unpack(fmtStr, data)
+				values := result.([]interface{})
+				rowx := int(values[0].(uint16))
+				colx := int(values[1].(uint16))
+				text := fmt.Sprintf("SHARED FMLA at rowx=%d colx=%d", rowx, colx)
+				spush(&Operand{kind: oUNK, value: nil, _rank: LeafRank, text: text})
+				if fmlatype&(FmlaTypeCell|FmlaTypeArray) == 0 {
+					unexpectedOpcode(op, oname)
+				}
+			} else if 0x03 <= opcode && opcode <= 0x0E { // Add, Sub, Mul, Div, Power, tConcat, tLT, ..., tNE
+				doBinop(opcode, stack)
+			} else if opcode == 0x0F { // tIsect
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tIsect pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					continue
+				}
+				bop := stack[len(stack)-1].(*Operand)
+				aop := stack[len(stack)-2].(*Operand)
+				sym := " "
+				rank := 80
+				otext := ""
+				if aop._rank < rank {
+					otext += "("
+				}
+				otext += aop.text
+				if aop._rank < rank {
+					otext += ")"
+				}
+				otext += sym
+				if bop._rank < rank {
+					otext += "("
+				}
+				otext += bop.text
+				if bop._rank < rank {
+					otext += ")"
+				}
+
+				res := &Operand{kind: oREF}
+				res.text = otext
+				if bop.kind == oERR || aop.kind == oERR {
+					res.kind = oERR
+				} else if bop.kind == oUNK || aop.kind == oUNK {
+					// This can happen with undefined labels
+				} else if bop.kind == oREF && aop.kind == oREF {
+					// pass
+				} else if bop.kind == oREL && aop.kind == oREL {
+					res.kind = oREL
+				}
+				stack = stack[:len(stack)-2]
+				spush(res)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tIsect post %v\n", stack)
+				}
+			} else if opcode == 0x10 { // tList
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tList pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					continue
+				}
+				bop := stack[len(stack)-1].(*Operand)
+				aop := stack[len(stack)-2].(*Operand)
+				sym := ","
+				rank := 80
+				otext := ""
+				if aop._rank < rank {
+					otext += "("
+				}
+				otext += aop.text
+				if aop._rank < rank {
+					otext += ")"
+				}
+				otext += sym
+				if bop._rank < rank {
+					otext += "("
+				}
+				otext += bop.text
+				if bop._rank < rank {
+					otext += ")"
+				}
+
+				res := &Operand{kind: oREF, value: nil, _rank: rank, text: otext}
+				if bop.kind == oERR || aop.kind == oERR {
+					res.kind = oERR
+				} else if (bop.kind == oREF || bop.kind == oREL) && (aop.kind == oREF || aop.kind == oREL) {
+					res.kind = oREF
+					if aop.kind == oREL || bop.kind == oREL {
+						res.kind = oREL
+					}
+				}
+				stack = stack[:len(stack)-2]
+				spush(res)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tList post %v\n", stack)
+				}
+			} else if opcode == 0x11 { // tRange
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRange pre %v\n", stack)
+				}
+				if len(stack) < 2 {
+					continue
+				}
+				bop := stack[len(stack)-1].(*Operand)
+				aop := stack[len(stack)-2].(*Operand)
+				sym := ":"
+				rank := 80
+				otext := ""
+				if aop._rank < rank {
+					otext += "("
+				}
+				otext += aop.text
+				if aop._rank < rank {
+					otext += ")"
+				}
+				otext += sym
+				if bop._rank < rank {
+					otext += "("
+				}
+				otext += bop.text
+				if bop._rank < rank {
+					otext += ")"
+				}
+
+				res := &Operand{kind: oREF, value: nil, _rank: rank, text: otext}
+				if bop.kind == oERR || aop.kind == oERR {
+					res.kind = oERR
+				} else if bop.kind == oREF && aop.kind == oREF {
+					// pass
+				}
+				stack = stack[:len(stack)-2]
+				spush(res)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRange post %v\n", stack)
+				}
+			} else if 0x12 <= opcode && opcode <= 0x14 { // tUplus, tUminus, tPercent
+				doUnaryop(opcode, oNUM, stack)
+			} else if opcode == 0x15 { // tParen
+				// source cosmetics
+			} else if opcode == 0x16 { // tMissArg
+				spush(&Operand{kind: oMSNG, value: nil, _rank: LeafRank, text: ""})
+			} else if opcode == 0x17 { // tStr
+				var strg string
+				var newpos int
+				if bv <= 70 {
+					strg, newpos = unpackStringUpdatePos(data, pos+1, bk.Encoding, 1)
+				} else {
+					strg, newpos = unpackUnicodeUpdatePos(data, pos+1, 1)
+				}
+				sz = newpos - pos
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "   sz=%d strg=%q\n", sz, strg)
+				}
+				text := "\"" + strings.ReplaceAll(strg, "\"", "\"\"") + "\""
+				spush(&Operand{kind: oSTRG, value: nil, _rank: LeafRank, text: text})
+			} else if opcode == 0x18 { // tExtended
+				// new with BIFF 8
+				assert(bv >= 80)
+				panic("tExtended token not implemented")
+			} else if opcode == 0x19 { // tAttr
+				result, err := unpack("<BH", data[pos+1:pos+4])
+				if err != nil {
+					panic(err)
+				}
+				values := result.([]interface{})
+				subop := values[0].(uint8)
+				nc := values[1].(uint16)
+				subname := tAttrNames[int(subop)]
+				if subop == 0x04 { // Choose
+					sz = int(nc)*2 + 6
+				} else if subop == 0x10 { // Sum (single arg)
+					sz = 4
+					if blah != 0 {
+						fmt.Fprintf(bk.logfile, "tAttrSum %v\n", stack)
+					}
+					if len(stack) >= 1 {
+						aop := stack[len(stack)-1].(*Operand)
+						otext := "SUM(" + aop.text + ")"
+						stack[len(stack)-1] = &Operand{kind: oNUM, value: nil, _rank: FuncRank, text: otext}
+					}
+				} else {
+					sz = 4
+				}
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "   subop=%02xh subname=t%s sz=%d nc=%02xh\n", subop, subname, sz, nc)
+				}
+			} else if 0x1A <= opcode && opcode <= 0x1B { // tSheet, tEndSheet
+				assert(bv < 50)
+				panic("tSheet & tEndsheet tokens not implemented")
+			} else if 0x1C <= opcode && opcode <= 0x1F { // tErr, tBool, tInt, tNum
+				inx := opcode - 0x1C
+				nb := []int{1, 1, 2, 8}[inx]
+				kind := []int{oERR, oBOOL, oNUM, oNUM}[inx]
+				value, _ := unpack([]string{"<B", "<B", "<H", "<d"}[inx], data[pos+1:pos+1+nb])
+				var text string
+				if inx == 2 { // tInt
+					value = float64(value.(int16))
+					text = fmt.Sprintf("%v", value)
+				} else if inx == 3 { // tNum
+					text = fmt.Sprintf("%v", value)
+				} else if inx == 1 { // tBool
+					if value.(uint8) != 0 {
+						text = "TRUE"
+					} else {
+						text = "FALSE"
+					}
+				} else {
+					text = "\"" + errorTextFromCode[int(value.(uint8))] + "\""
+				}
+				spush(&Operand{kind: kind, value: value, _rank: LeafRank, text: text})
+			} else {
+				panic(fmt.Sprintf("Unhandled opcode: 0x%02x", opcode))
+			}
+			if sz <= 0 {
+				panic(fmt.Sprintf("Size not set for opcode 0x%02x", opcode))
+			}
+			pos += sz
+			continue
+		}
+
+		// optype != 0 (variable-length tokens)
+		if opcode == 0x00 { // tArray
+			spush(unkOpnd)
+		} else if opcode == 0x01 { // tFunc
+			nb := 1
+			if bv >= 40 {
+				nb = 2
+			}
+			fmtStr := "<"
+			if nb == 2 {
+				fmtStr += "B"
+			}
+			fmtStr += "H"
+			funcx, _ := unpack(fmtStr, data[pos+1:pos+1+nb])
+			funcAttrs, ok := funcDefs[funcx.(int)]
+			if !ok {
+				fmt.Fprintf(bk.logfile, "*** formula/tFunc unknown FuncID:%d\n", funcx)
+				spush(unkOpnd)
+			} else {
+				funcName := funcAttrs.name
+				nargs := funcAttrs.minArgs
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "    FuncID=%d name=%s nargs=%d\n", funcx, funcName, nargs)
+				}
+				assert(len(stack) >= nargs)
+				var otext string
+				if nargs > 0 {
+					argtext := make([]string, nargs)
+					for i := 0; i < nargs; i++ {
+						argtext[i] = stack[len(stack)-nargs+i].(*Operand).text
+					}
+					otext = funcName + "(" + strings.Join(argtext, listsep) + ")"
+					for i := 0; i < nargs; i++ {
+						stack = stack[:len(stack)-1]
+					}
+				} else {
+					otext = funcName + "()"
+				}
+				res := &Operand{kind: oUNK, value: nil, _rank: FuncRank, text: otext}
+				spush(res)
+			}
+		} else if opcode == 0x02 { // tFuncVar
+			nb := 1
+			if bv >= 40 {
+				nb = 2
+			}
+			fmtStr := "<B"
+			if nb == 2 {
+				fmtStr += "B"
+			}
+			fmtStr += "H"
+			nargs_funcx, _ := unpack(fmtStr, data[pos+1:pos+2+nb])
+			nargs := nargs_funcx.([]interface{})[0].(uint8)
+			funcx := nargs_funcx.([]interface{})[1].(uint16)
+			prompt := nargs >> 7
+			nargs &= 0x7F
+			macro := funcx >> 15
+			funcx &= 0x7FFF
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   FuncID=%d nargs=%d macro=%d prompt=%d\n", funcx, nargs, macro, prompt)
+			}
+			funcAttrs, ok := funcDefs[int(funcx)]
+			if !ok {
+				fmt.Fprintf(bk.logfile, "*** formula/tFuncVar unknown FuncID:%d\n", funcx)
+				spush(unkOpnd)
+			} else {
+				funcName := funcAttrs.name
+				minargs := funcAttrs.minArgs
+				maxargs := funcAttrs.maxArgs
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "    name: %s, min~max args: %d~%d\n", funcName, minargs, maxargs)
+				}
+				assert(minargs <= int(nargs) && int(nargs) <= maxargs)
+				assert(len(stack) >= int(nargs))
+				assert(len(stack) >= int(nargs))
+				argtext := make([]string, nargs)
+				for i := 0; i < int(nargs); i++ {
+					argtext[i] = stack[len(stack)-int(nargs)+i].(*Operand).text
+				}
+				otext := funcName + "(" + strings.Join(argtext, listsep) + ")"
+				res := &Operand{kind: oUNK, value: nil, _rank: FuncRank, text: otext}
+				if funcx == 1 { // IF
+					testarg := stack[len(stack)-int(nargs)].(*Operand)
+					if testarg.kind != oNUM && testarg.kind != oBOOL {
+						if blah != 0 && testarg.kind != oUNK {
+							fmt.Fprintf(bk.logfile, "IF testarg kind?\n")
+						}
+					} else if testarg.value != 0 && testarg.value != 1 {
+						if blah != 0 && testarg.value != nil {
+							fmt.Fprintf(bk.logfile, "IF testarg value?\n")
+						}
+					} else {
+						if int(nargs) == 2 && testarg.value == 0 {
+							// IF(FALSE, tv) => FALSE
+							res.kind = oBOOL
+							res.value = 0
+						} else {
+							respos := len(stack) - int(nargs) + 2 - int(testarg.value.(int))
+							chosen := stack[respos].(*Operand)
+							if chosen.kind == oMSNG {
+								res.kind = oNUM
+								res.value = 0
+							} else {
+								res.kind = chosen.kind
+								res.value = chosen.value
+							}
+							if blah != 0 {
+								fmt.Fprintf(bk.logfile, "$$$$$$ IF => constant\n")
+							}
+						}
+					}
+				} else if funcx == 100 { // CHOOSE
+					testarg := stack[len(stack)-int(nargs)].(*Operand)
+					if testarg.kind == oNUM {
+						if 1 <= testarg.value.(int) && testarg.value.(int) < int(nargs) {
+							chosen := stack[len(stack)-int(nargs)+testarg.value.(int)].(*Operand)
+							if chosen.kind == oMSNG {
+								res.kind = oNUM
+								res.value = 0
+							} else {
+								res.kind = chosen.kind
+								res.value = chosen.value
+							}
+						}
+					}
+				}
+				for i := 0; i < int(nargs); i++ {
+					stack = stack[:len(stack)-1]
+				}
+				spush(res)
+			}
+		} else if opcode == 0x03 { // tName
+			tgtnamex_raw, _ := unpack("<H", data[pos+1:pos+3])
+			tgtnamex := int(tgtnamex_raw.(uint16)) - 1
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   tgtnamex=%d\n", tgtnamex)
+			}
+			tgtobj := bk.NameObjList[tgtnamex]
+			if !tgtobj.Evaluated {
+				// recursive
+				evaluateNameFormula(bk, tgtobj, tgtnamex, blah, level+1)
+			}
+			var res *Operand
+			if tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0 {
+				if blah != 0 {
+					tgtobj.Dump(bk.logfile, "!!! tgtobj has problems!!!", "-----------       --------", 0)
+				}
+				res = &Operand{kind: oUNK, value: nil}
+				anyErr = boolToInt(anyErr != 0 || tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0)
+				anyRel = boolToInt(anyRel != 0 || tgtobj.AnyRel != 0)
+			} else {
+				assert(len(tgtobj.Stack) == 1)
+				res = copyOperand(tgtobj.Stack[0])
+			}
+			res._rank = LeafRank
+			if tgtobj.Scope == -1 {
+				res.text = tgtobj.Name
+			} else {
+				res.text = bk.SheetNames()[tgtobj.Scope] + "!" + tgtobj.Name
+			}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "    tName: setting text to %q\n", res.text)
+			}
+			spush(res)
+		} else if opcode == 0x04 { // tRef
+			rowx, colx, rowRel, colRel := getCellAddr(data, pos+1, bv, reldelta, browx, bcolx)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  (%d, %d, %d, %d)\n", rowx, colx, rowRel, colRel)
+			}
+			shx1 := 0
+			shx2 := 0 // N.B. relative to the CURRENT SHEET #######
+			anyRel = boolToInt(anyRel != 0 || rowRel != 0 || colRel != 0)
+			coords := []int{shx1, shx2 + 1, rowx, rowx + 1, colx, colx + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			var ref3d *Ref3D
+			if optype == 1 {
+				relflags := []int{1, 1, rowRel, rowRel, colRel, colRel}
+				ref3d = NewRef3D(append(coords, relflags...)...)
+				resOp.kind = oREL
+				resOp.text = rangename3drel(bk, ref3d, r1c1)
+			} else {
+				ref3d = NewRef3D(coords...)
+				resOp.kind = oREF
+				resOp.text = rangename3d(bk, ref3d)
+			}
+			resOp._rank = LeafRank
+			if optype == 1 {
+				resOp.value = []*Ref3D{ref3d}
+			}
+			spush(resOp)
+		} else if opcode == 0x05 { // tArea
+			res1, res2 := getCellRangeAddr(data, pos+1, bv, reldelta, browx, bcolx)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  %v %v\n", res1, res2)
+			}
+			rowx1, colx1, rowRel1, colRel1 := res1[0], res1[1], res1[2], res1[3]
+			rowx2, colx2, rowRel2, colRel2 := res2[0], res2[1], res2[2], res2[3]
+			shx1 := 0
+			shx2 := 0 // N.B. relative to the CURRENT SHEET #######
+			anyRel = boolToInt(anyRel != 0 || rowRel1 != 0 || colRel1 != 0 || rowRel2 != 0 || colRel2 != 0)
+			coords := []int{shx1, shx2 + 1, rowx1, rowx2 + 1, colx1, colx2 + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			var ref3d *Ref3D
+			if optype == 1 {
+				relflags := []int{1, 1, rowRel1, rowRel2, colRel1, colRel2}
+				ref3d = NewRef3D(append(coords, relflags...)...)
+				resOp.kind = oREL
+				resOp.text = rangename3drel(bk, ref3d, r1c1)
+			} else {
+				ref3d = NewRef3D(coords...)
+				resOp.kind = oREF
+				resOp.text = rangename3d(bk, ref3d)
+			}
+			resOp._rank = LeafRank
+			if optype == 1 {
+				resOp.value = []*Ref3D{ref3d}
+			}
+			spush(resOp)
+		} else if opcode == 0x06 { // tMemArea
+			panic("tMemArea not implemented")
+		} else if opcode == 0x09 { // tMemFunc
+			nb, _ := unpack("<H", data[pos+1:pos+3])
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  %d bytes of cell ref formula\n", nb)
+			}
+			// no effect on stack
+		} else if opcode == 0x0C { // tRefN
+			panic("tRefN not implemented")
+		} else if opcode == 0x0D { // tAreaN
+			panic("tAreaN not implemented")
+		} else if opcode == 0x1A { // tRef3d
+			var refx int
+			var shx1, shx2 int
+			var rowx, colx, rowRel, colRel int
+			if bv >= 80 {
+				rowx, colx, rowRel, colRel = getCellAddr(data, pos+3, bv, reldelta, browx, bcolx)
+				refx_raw, _ := unpack("<H", data[pos+1:pos+3])
+				refx = int(refx_raw.(uint16))
+				shx1, shx2 = getExternsheetLocalRange(bk, refx, blah)
+			} else {
+				rowx, colx, rowRel, colRel = getCellAddr(data, pos+15, bv, reldelta, browx, bcolx)
+				result, _ := unpack("<hxxxxxxxxhh", data[pos+1:pos+15])
+				values := result.([]interface{})
+				rawExtshtx := values[0].(int16)
+				rawShx1 := values[1].(int16)
+				rawShx2 := values[2].(int16)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tRef3d %d %d %d\n", rawExtshtx, rawShx1, rawShx2)
+				}
+				shx1, shx2 = getExternsheetLocalRangeB57(bk, int(rawExtshtx), int(rawShx1), int(rawShx2), blah)
+			}
+			isRel := rowRel != 0 || colRel != 0
+			anyRel = boolToInt(anyRel != 0 || isRel)
+			coords := []int{shx1, shx2 + 1, rowx, rowx + 1, colx, colx + 1}
+			anyErr = boolToInt(anyErr != 0 || shx1 < -1)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			var ref3d *Ref3D
+			if isRel {
+				relflags := []int{0, 0, rowRel, rowRel, colRel, colRel}
+				ref3d = NewRef3D(append(coords, relflags...)...)
+				resOp.kind = oREL
+				resOp.text = rangename3drel(bk, ref3d, r1c1)
+			} else {
+				ref3d = NewRef3D(coords...)
+				resOp.kind = oREF
+				resOp.text = rangename3d(bk, ref3d)
+			}
+			resOp._rank = LeafRank
+			if optype == 1 {
+				resOp.value = []*Ref3D{ref3d}
+			}
+			spush(resOp)
+		} else if opcode == 0x1B { // tArea3d
+			var res1, res2 [4]int
+			var refx int
+			var shx1, shx2 int
+			if bv >= 80 {
+				res1, res2 = getCellRangeAddr(data, pos+3, bv, reldelta, browx, bcolx)
+				refx_raw, _ := unpack("<H", data[pos+1:pos+3])
+				refx = int(refx_raw.(uint16))
+				shx1, shx2 = getExternsheetLocalRange(bk, refx, blah)
+			} else {
+				res1, res2 = getCellRangeAddr(data, pos+15, bv, reldelta, browx, bcolx)
+				result, _ := unpack("<hxxxxxxxxhh", data[pos+1:pos+15])
+				values := result.([]interface{})
+				rawExtshtx := values[0].(int16)
+				rawShx1 := values[1].(int16)
+				rawShx2 := values[2].(int16)
+				if blah != 0 {
+					fmt.Fprintf(bk.logfile, "tArea3d %d %d %d\n", rawExtshtx, rawShx1, rawShx2)
+				}
+				shx1, shx2 = getExternsheetLocalRangeB57(bk, int(rawExtshtx), int(rawShx1), int(rawShx2), blah)
+			}
+			anyErr = boolToInt(anyErr != 0 || shx1 < -1)
+			rowx1, colx1, rowRel1, colRel1 := res1[0], res1[1], res1[2], res1[3]
+			rowx2, colx2, rowRel2, colRel2 := res2[0], res2[1], res2[2], res2[3]
+			isRel := rowRel1 != 0 || colRel1 != 0 || rowRel2 != 0 || colRel2 != 0
+			anyRel = boolToInt(anyRel != 0 || isRel)
+			coords := []int{shx1, shx2 + 1, rowx1, rowx2 + 1, colx1, colx2 + 1}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v\n", coords)
+			}
+			resOp := &Operand{kind: oUNK, value: nil}
+			var ref3d *Ref3D
+			if isRel {
+				relflags := []int{0, 0, rowRel1, rowRel2, colRel1, colRel2}
+				ref3d = NewRef3D(append(coords, relflags...)...)
+				resOp.kind = oREL
+				resOp.text = rangename3drel(bk, ref3d, r1c1)
+			} else {
+				ref3d = NewRef3D(coords...)
+				resOp.kind = oREF
+				resOp.text = rangename3d(bk, ref3d)
+			}
+			resOp._rank = LeafRank
+			if optype == 1 {
+				resOp.value = []*Ref3D{ref3d}
+			}
+			spush(resOp)
+		} else if opcode == 0x19 { // tNameX
+			dodgy := 0
+			res := &Operand{kind: oUNK, value: nil}
+			var refx, tgtnamex, origrefx int
+			if bv >= 80 {
+				result, _ := unpack("<HH", data[pos+1:pos+5])
+				values := result.([]interface{})
+				refx = int(values[0].(uint16))
+				tgtnamex = int(values[1].(uint16)) - 1
+				origrefx = refx
+			} else {
+				result, _ := unpack("<hxxxxxxxxH", data[pos+1:pos+13])
+				values := result.([]interface{})
+				refx := int(values[0].(int16))
+				tgtnamex = int(values[1].(uint16)) - 1
+				origrefx = refx
+				if refx > 0 {
+					refx -= 1
+				} else if refx < 0 {
+					refx = -refx - 1
+				} else {
+					dodgy = 1
+				}
+			}
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   origrefx=%d refx=%d tgtnamex=%d dodgy=%d\n", origrefx, refx, tgtnamex, dodgy)
+			}
+			if tgtnamex == -1 { // special marker for current formula name
+				dodgy = boolToInt(anyErr != 0 || true)
+			}
+			if dodgy == 0 {
+				var shx1, _ int
+				if bv >= 80 {
+					shx1, _ = getExternsheetLocalRange(bk, refx, blah)
+				} else if origrefx > 0 {
+					shx1, _ = -4, -4 // external ref
+				} else {
+					exty := bk.externsheetTypeB57[refx]
+					if exty == 4 { // non-specific sheet in own doc't
+						shx1, _ = -1, -1 // internal, any sheet
+					} else {
+						shx1, _ = -666, -666
+					}
+				}
+				if dodgy != 0 || shx1 < -1 {
+					otext := fmt.Sprintf("<<Name #%d in external(?) file #%d>>", tgtnamex, origrefx)
+					res = &Operand{kind: oUNK, value: nil, _rank: LeafRank, text: otext}
+				} else {
+					tgtobj := bk.NameObjList[tgtnamex]
+					if !tgtobj.Evaluated {
+						// recursive
+						evaluateNameFormula(bk, tgtobj, tgtnamex, blah, level+1)
+					}
+					if tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0 {
+						if blah != 0 {
+							tgtobj.Dump(bk.logfile, "!!! bad tgtobj !!!", "------------------", 0)
+						}
+						res = &Operand{kind: oUNK, value: nil}
+						anyErr = boolToInt(anyErr != 0 || tgtobj.Macro != 0 || tgtobj.Binary != 0 || tgtobj.AnyErr != 0)
+						anyRel = boolToInt(anyRel != 0 || tgtobj.AnyRel != 0)
+					} else {
+						assert(len(tgtobj.Stack) == 1)
+						res = copyOperand(tgtobj.Stack[0])
+					}
+					res._rank = LeafRank
+					if tgtobj.Scope == -1 {
+						res.text = tgtobj.Name
+					} else {
+						res.text = bk.SheetNames()[tgtobj.Scope] + "!" + tgtobj.Name
+					}
+					if blah != 0 {
+						fmt.Fprintf(bk.logfile, "    tNameX: setting text to %q\n", res.text)
+					}
+				}
+			}
+			spush(res)
+		} else if _, ok := errorOpcodes[opcode]; ok {
+			anyErr = 1
+			spush(errorOpnd)
+		} else {
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "FORMULA: /// Not handled yet: t%s\n", oname)
+			}
+			anyErr = 1
+		}
+		if sz <= 0 {
+			panic("Fatal: token size is not positive")
+		}
+		pos += sz
 	}
 
-	// Binary operation rules: token -> (argdict, result_kind, func, rank, symbol)
-	binopRules = map[int][5]interface{}{
-		tAdd:    {arithArgdict, oNUM, func(a, b float64) float64 { return a + b }, 30, "+"},
-		tSub:    {arithArgdict, oNUM, func(a, b float64) float64 { return a - b }, 30, "-"},
-		tMul:    {arithArgdict, oNUM, func(a, b float64) float64 { return a * b }, 40, "*"},
-		tDiv:    {arithArgdict, oNUM, func(a, b float64) float64 { return a / b }, 40, "/"},
-		tPower:  {arithArgdict, oNUM, OprPow, 50, "^"},
-		tConcat: {strgArgdict, oSTRG, func(a, b string) string { return a + b }, 20, "&"},
-		tLT:     {cmpArgdict, oBOOL, OprLt, 10, "<"},
-		tLE:     {cmpArgdict, oBOOL, OprLe, 10, "<="},
-		tEQ:     {cmpArgdict, oBOOL, OprEq, 10, "="},
-		tGE:     {cmpArgdict, oBOOL, OprGe, 10, ">="},
-		tGT:     {cmpArgdict, oBOOL, OprGt, 10, ">"},
-		tNE:     {cmpArgdict, oBOOL, OprNe, 10, "<>"},
+	if blah != 0 {
+		fmt.Fprintf(bk.logfile, "End of formula. level=%d any_rel=%d any_err=%d stack=%v\n",
+			level, anyRel, anyErr, stack)
+		if len(stack) >= 2 {
+			fmt.Fprintf(bk.logfile, "*** Stack has unprocessed args\n")
+		}
+		fmt.Fprintf(bk.logfile, "\n")
 	}
 
-	// Unary operation rules: token -> (func, rank, sym1, sym2)
-	unopRules = map[int][4]interface{}{
-		0x12: {func(x float64) float64 { return x }, 70, "+", ""},         // unary plus
-		0x13: {func(x float64) float64 { return -x }, 70, "-", ""},        // unary minus
-		0x14: {func(x float64) float64 { return x / 100.0 }, 60, "", "%"}, // percent
+	if len(stack) == 1 {
+		result := stack[0].(*Operand)
+		return result.text
 	}
-)
+	return "<<Stack underflow>>"
+}

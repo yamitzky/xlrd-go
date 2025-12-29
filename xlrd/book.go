@@ -132,6 +132,7 @@ type Book struct {
 	extnshtCount       int
 	supbookTypes       []int
 	addinFuncNames     []string
+	allSheetsMap       []int // maps an all_sheets index to a calc-sheets index (or -1)
 }
 
 // Name represents information relating to a named reference, formula, macro, etc.
@@ -185,6 +186,21 @@ type Name struct {
 
 	// BasicFormulaLen is the length of the basic formula
 	BasicFormulaLen int
+
+	// Evaluated indicates if the name has been evaluated
+	Evaluated bool
+
+	// AnyErr indicates if there are any errors in the name
+	AnyErr int
+
+	// AnyRel indicates if the name contains relative references
+	AnyRel int
+
+	// AnyExternal indicates if the name refers to external references
+	AnyExternal int
+
+	// Stack contains the evaluation stack for the name
+	Stack []*Operand
 }
 
 // Cell returns a single cell that the name refers to.
