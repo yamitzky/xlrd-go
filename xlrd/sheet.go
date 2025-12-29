@@ -106,7 +106,7 @@ func (s *Sheet) CellValue(rowx, colx int) interface{} {
 	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
 		return nil
 	}
-	if rowx >= len(s.cellValues) || colx >= len(s.cellValues[rowx]) {
+	if rowx >= len(s.cellValues) || s.cellValues[rowx] == nil || colx >= len(s.cellValues[rowx]) {
 		return ""
 	}
 	value := s.cellValues[rowx][colx]
@@ -118,7 +118,7 @@ func (s *Sheet) CellValue(rowx, colx int) interface{} {
 
 // CellType returns the type of the cell at the given row and column.
 func (s *Sheet) CellType(rowx, colx int) int {
-	if rowx < 0 || rowx >= len(s.cellTypes) || colx < 0 || colx >= len(s.cellTypes[rowx]) {
+	if rowx < 0 || rowx >= len(s.cellTypes) || s.cellTypes[rowx] == nil || colx < 0 || colx >= len(s.cellTypes[rowx]) {
 		return XL_CELL_EMPTY
 	}
 	return s.cellTypes[rowx][colx]
@@ -320,7 +320,7 @@ func (s *Sheet) CellXFIndex(rowx, colx int) int {
 	if rowx < 0 || rowx >= s.NRows || colx < 0 || colx >= s.NCols {
 		return 0
 	}
-	if rowx >= len(s.cellXFIndexes) || colx >= len(s.cellXFIndexes[rowx]) || s.cellXFIndexes[rowx][colx] == 0 {
+	if rowx >= len(s.cellXFIndexes) || s.cellXFIndexes[rowx] == nil || colx >= len(s.cellXFIndexes[rowx]) || s.cellXFIndexes[rowx][colx] == 0 {
 		return 15 // Default XF index for empty cells
 	}
 	return s.cellXFIndexes[rowx][colx]
@@ -361,21 +361,42 @@ func (s *Sheet) putCell(rowx, colx int, ctype int, value interface{}, xfIndex in
 
 // read reads and parses the sheet data from the workbook.
 func (s *Sheet) read(bk *Book) error {
+	// Find the sheet index to get stream length
+	sheetIndex := -1
+	for i, name := range bk.sheetNames {
+		if name == s.Name {
+			sheetIndex = i
+			break
+		}
+	}
+
+	var maxPosition int
+	if sheetIndex >= 0 && sheetIndex < len(bk.sheetStreamLen) {
+		maxPosition = bk.sheetAbsPosn[sheetIndex] + bk.sheetStreamLen[sheetIndex]
+	} else {
+		maxPosition = len(bk.mem)
+	}
+
 	// Initialize cell arrays
 	s.cellValues = make([][]interface{}, 0)
 	s.cellTypes = make([][]int, 0)
 	s.cellXFIndexes = make([][]int, 0)
 
-	// Parse BIFF records
+	// Parse BIFF records until EOF or end of sheet stream
 	for {
+		if bk.position >= maxPosition {
+			break
+		}
 		rc, dataLen, data := bk.getRecordParts()
 		if rc == XL_EOF {
 			break
 		}
 
+		// Debug all records for first sheet
+
 		// Debug for column B records
 		switch rc {
-		case XL_NUMBER:
+		case XL_NUMBER, XL_NUMBER_B2:
 			if dataLen >= 14 {
 				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
 				colx := int(binary.LittleEndian.Uint16(data[2:4]))
@@ -394,6 +415,14 @@ func (s *Sheet) read(bk *Book) error {
 					value := bk.sharedStrings[sstIndex]
 					s.putCell(rowx, colx, XL_CELL_TEXT, value, xfIndex)
 				}
+			}
+		case XL_RK:
+			if dataLen >= 10 {
+				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
+				colx := int(binary.LittleEndian.Uint16(data[2:4]))
+				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
+				rkValue := unpackRK(data[6:10])
+				s.putCell(rowx, colx, XL_CELL_NUMBER, rkValue, xfIndex)
 			}
 		case XL_LABEL:
 			if dataLen >= 6 {
@@ -486,6 +515,43 @@ func (s *Sheet) handleFormulaStringResult(bk *Book, rowx, colx, xfIndex int) {
 	}
 
 	s.putCell(rowx, colx, XL_CELL_TEXT, strg, xfIndex)
+}
+
+// unpackRK decodes an RK value (Real number + Key) from Excel BIFF format.
+func unpackRK(rkData []byte) float64 {
+	if len(rkData) != 4 {
+		return 0.0
+	}
+
+	rkValue := binary.LittleEndian.Uint32(rkData)
+	flags := rkValue & 3 // Lower 2 bits are flags
+
+	if flags&2 != 0 {
+		// Signed 30-bit integer
+		i := int32(rkValue) >> 2 // Shift right by 2 to drop flag bits
+		result := float64(i)
+		if flags&1 != 0 {
+			result /= 100.0
+		}
+		return result
+	} else {
+		// IEEE 754 64-bit float (30 most significant bits)
+		// Reconstruct the 64-bit float from 30 bits + 2 flag bits
+		// Python: b'\0\0\0\0' + BYTES_LITERAL(chr(flags & 252)) + rk_str[1:4]
+		flagsByte := byte(flags)
+		rkDataByte0 := rkData[0]
+		msb := (flagsByte & 0xFC) | ((rkDataByte0 & 0xC0) >> 6) // Clear lower 2 bits, add 2 bits from rkData[0]
+		middle := []byte{rkData[1], rkData[2], rkData[3]}
+
+		// Create 64-bit IEEE 754 float bytes: 4 zero bytes + reconstructed bytes
+		floatBytes := []byte{0, 0, 0, 0, msb, middle[0], middle[1], middle[2]}
+		bits := binary.LittleEndian.Uint64(floatBytes)
+		result := math.Float64frombits(bits)
+		if flags&1 != 0 {
+			result /= 100.0
+		}
+		return result
+	}
 }
 
 // stringRecordContents parses a STRING record's content.

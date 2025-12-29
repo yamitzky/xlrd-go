@@ -83,6 +83,7 @@ type Book struct {
 	sheetList        []*Sheet
 	sheetNames       []string
 	sheetAbsPosn     []int // Absolute positions of sheets in the stream
+	sheetStreamLen   []int // Stream lengths of sheets
 	sheetVisibility  []int
 	onDemand         bool
 	logfile          io.Writer
@@ -92,9 +93,10 @@ type Book struct {
 	streamLen         int
 	position          int
 	filestr           []byte
-	formattingInfo    bool
-	raggedRows        bool
-	encodingOverride  string
+	formattingInfo           bool
+	raggedRows               bool
+	encodingOverride         string
+	ignoreWorkbookCorruption bool
 	sharedStrings     []string
 }
 
@@ -248,9 +250,9 @@ type OpenWorkbookOptions struct {
 	// True means that there are no empty cells at the ends of rows.
 	RaggedRows bool
 
-	// IgnoreWorkbookCorruption allows to read corrupted workbooks.
-	// When false you may face CompDocError: Workbook corruption.
-	// When true that error will be ignored.
+	// IgnoreWorkbookCorruption allows reading corrupted workbooks.
+	// When false (default), you may face CompDocError: Workbook corruption.
+	// When true, that exception will be ignored.
 	IgnoreWorkbookCorruption bool
 }
 
@@ -300,6 +302,7 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 	bk.formattingInfo = options.FormattingInfo
 	bk.raggedRows = options.RaggedRows
 	bk.encodingOverride = options.EncodingOverride
+	bk.ignoreWorkbookCorruption = options.IgnoreWorkbookCorruption
 	
 	// Read file
 	fileContents, err := os.ReadFile(filename)
@@ -326,14 +329,25 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 		// Try to locate Workbook or Book stream
 		var mem []byte
 		var base, streamLen int
+		var lastErr error
 		for _, qname := range []string{"Workbook", "Book"} {
 			mem, base, streamLen, err = cd.LocateNamedStream(qname)
 			if err == nil && mem != nil {
 				break
 			}
+			if err != nil {
+				lastErr = err
+				// Check if it's a corruption error that should not be ignored
+				if compDocErr, ok := err.(*CompDocError); ok && !options.IgnoreWorkbookCorruption {
+					return nil, compDocErr
+				}
+			}
 		}
-		
+
 		if mem == nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
 			return nil, NewXLRDError("Can't find workbook in OLE2 compound document")
 		}
 		
@@ -603,6 +617,16 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 		if code == XL_EOF {
 			break
 		}
+	}
+
+	// Calculate stream lengths for each sheet
+	b.sheetStreamLen = make([]int, len(b.sheetAbsPosn))
+	for i := 0; i < len(b.sheetAbsPosn)-1; i++ {
+		b.sheetStreamLen[i] = b.sheetAbsPosn[i+1] - b.sheetAbsPosn[i]
+	}
+	// Last sheet goes to end of stream
+	if len(b.sheetAbsPosn) > 0 {
+		b.sheetStreamLen[len(b.sheetAbsPosn)-1] = len(b.mem) - b.sheetAbsPosn[len(b.sheetAbsPosn)-1]
 	}
 
 	return nil
