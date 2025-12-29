@@ -1,0 +1,15 @@
+baseURL = "/"
+languageCode = "en-us"
+title = "xlrd-go"
+paginate = 20
+enableRobotsTXT = true
+disableKinds = ["taxonomy", "term"]
+
+[params]
+  description = "Go port of xlrd for reading XLS files"
+
+[menu]
+  [[menu.main]]
+    name = "Docs"
+    pageRef = "/docs/"
+    weight = 10

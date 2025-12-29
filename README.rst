@@ -1,60 +1,55 @@
-xlrd
-====
+xlrd-go
+=======
 
-|Build Status|_ |Coverage Status|_ |Documentation|_ |PyPI version|_
+xlrd-go is a pure Go port of the classic xlrd library for reading legacy
+``.xls`` files (BIFF2-8). It focuses on extracting cell values and formatting
+information from historical Excel spreadsheets.
 
-.. |Build Status| image:: https://circleci.com/gh/python-excel/xlrd/tree/master.svg?style=shield
-.. _Build Status: https://circleci.com/gh/python-excel/xlrd/tree/master
+This library only supports ``.xls`` files. For newer formats such as ``.xlsx``,
+use a different library.
 
-.. |Coverage Status| image:: https://codecov.io/gh/python-excel/xlrd/branch/master/graph/badge.svg?token=lNSqwBBbvk
-.. _Coverage Status: https://codecov.io/gh/python-excel/xlrd
+Not supported (ignored safely):
 
-.. |Documentation| image:: https://readthedocs.org/projects/xlrd/badge/?version=latest
-.. _Documentation: http://xlrd.readthedocs.io/en/latest/?badge=latest
+* Charts, macros, pictures, and embedded objects (including embedded worksheets)
+* VBA modules
+* Formula evaluation beyond returning cached results
+* Comments and hyperlinks
+* Autofilters, advanced filters, pivot tables, conditional formatting, data validation
 
-.. |PyPI version| image:: https://badge.fury.io/py/xlrd.svg
-.. _PyPI version: https://badge.fury.io/py/xlrd
-
-
-xlrd is a library for reading data and formatting information from Excel
-files in the historical ``.xls`` format.
-
-.. warning::
-
-  This library will no longer read anything other than ``.xls`` files. For
-  alternatives that read newer file formats, please see http://www.python-excel.org/.
-
-The following are also not supported but will safely and reliably be ignored:
-
-*   Charts, Macros, Pictures, any other embedded object, **including** embedded worksheets.
-*   VBA modules
-*   Formulas, but results of formula calculations are extracted.
-*   Comments
-*   Hyperlinks
-*   Autofilters, advanced filters, pivot tables, conditional formatting, data validation
-
-Password-protected files are not supported and cannot be read by this library.
+Password-protected files are not supported.
 
 Quick start:
 
 .. code-block:: bash
 
-    pip install xlrd
-    
-.. code-block:: python
+    go get github.com/yamitzky/xlrd-go
 
-    import xlrd
-    book = xlrd.open_workbook("myfile.xls")
-    print("The number of worksheets is {0}".format(book.nsheets))
-    print("Worksheet name(s): {0}".format(book.sheet_names()))
-    sh = book.sheet_by_index(0)
-    print("{0} {1} {2}".format(sh.name, sh.nrows, sh.ncols))
-    print("Cell D30 is {0}".format(sh.cell_value(rowx=29, colx=3)))
-    for rx in range(sh.nrows):
-        print(sh.row(rx))
+.. code-block:: go
 
-From the command line, this will show the first, second and last rows of each sheet in each file:
+    package main
 
-.. code-block:: bash
+    import (
+        "fmt"
 
-    python PYDIR/scripts/runxlrd.py 3rows *blah*.xls
+        "github.com/yamitzky/xlrd-go/xlrd"
+    )
+
+    func main() {
+        book, err := xlrd.OpenWorkbook("myfile.xls", nil)
+        if err != nil {
+            panic(err)
+        }
+
+        fmt.Printf("Worksheets: %d\n", book.NSheets)
+        fmt.Printf("Sheet names: %v\n", book.SheetNames())
+
+        sheet, err := book.SheetByIndex(0)
+        if err != nil {
+            panic(err)
+        }
+
+        fmt.Printf("%s %d %d\n", sheet.Name, sheet.NRows, sheet.NCols)
+        fmt.Printf("Cell D30: %v\n", sheet.CellValue(29, 3))
+    }
+
+Documentation lives under ``docs/`` and is built with Hugo.
