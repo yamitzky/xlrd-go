@@ -13,4 +13,4 @@ Go-focused documentation, API notes, and migration details.
 - File format notes and limitations
 - Migration status
 
-Get started in the [Documentation](/docs/) section.
+Get started in the [Documentation]({{< relref "docs/_index.md" >}}) section.

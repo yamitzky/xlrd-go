@@ -4,4 +4,4 @@
 {{ with .Site.Params.description }}
   <meta name="description" content="{{ . }}">
 {{ end }}
-<link rel="stylesheet" href="/css/main.css">
+<link rel="stylesheet" href="{{ "css/main.css" | relURL }}">

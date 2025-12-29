@@ -11,5 +11,5 @@ disableKinds = ["taxonomy", "term"]
 [menu]
   [[menu.main]]
     name = "Docs"
-    pageRef = "/docs/"
+    pageRef = "docs"
     weight = 10
