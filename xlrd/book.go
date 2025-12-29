@@ -10,6 +10,14 @@ import (
 	"golang.org/x/text/encoding/charmap"
 )
 
+const (
+	SUPBOOK_UNK       = 0
+	SUPBOOK_INTERNAL  = 1
+	SUPBOOK_EXTERNAL  = 2
+	SUPBOOK_ADDIN     = 3
+	SUPBOOK_DDEOLE    = 4
+)
+
 // Book represents the contents of a "workbook".
 //
 // You should not instantiate this type yourself. You use the Book
@@ -98,6 +106,17 @@ type Book struct {
 	encodingOverride         string
 	ignoreWorkbookCorruption bool
 	sharedStrings     []string
+
+	// External reference handling
+	supbookCount         int
+	supbookLocalsInx     *int
+	supbookAddinsInx     *int
+	externsheetInfo      [][]int
+	externsheetTypeB57   []int
+	extnshtNameFromNum   map[int]string
+	extnshtCount         int
+	supbookTypes         []int
+	addinFuncNames       []string
 }
 
 // Name represents information relating to a named reference, formula, macro, etc.
@@ -282,8 +301,13 @@ func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) 
 // OpenWorkbookXLS opens an XLS workbook file.
 func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, error) {
 	bk := &Book{
-		sheetList:  []*Sheet{},
-		sheetNames: []string{},
+		sheetList:           []*Sheet{},
+		sheetNames:          []string{},
+		externsheetInfo:     [][]int{},
+		externsheetTypeB57:  []int{},
+		extnshtNameFromNum:  make(map[int]string),
+		supbookTypes:        []int{},
+		addinFuncNames:      []string{},
 	}
 
 	if options == nil {
@@ -608,10 +632,21 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 			if err != nil {
 				return err
 			}
+		case XL_EXTERNNAME:
+			err := b.handleExternname(data)
+			if err != nil {
+				return err
+			}
 		case XL_EXTERNSHEET:
-			// TODO: handle externsheet - for now just skip
+			err := b.handleExternsheet(data)
+			if err != nil {
+				return err
+			}
 		case XL_SUPBOOK:
-			// TODO: handle supbook - for now just skip
+			err := b.handleSupbook(data)
+			if err != nil {
+				return err
+			}
 		case XL_SST:
 			err := b.handleSST(data)
 			if err != nil {
@@ -1058,6 +1093,120 @@ func (b *Book) handleSST(data []byte) error {
 		}
 
 		b.sharedStrings = append(b.sharedStrings, str)
+	}
+
+	return nil
+}
+
+// handleSupbook handles a SUPBOOK record (external book references).
+func (b *Book) handleSupbook(data []byte) error {
+	if len(data) < 2 {
+		return nil // Not enough data
+	}
+
+	b.supbookTypes = append(b.supbookTypes, SUPBOOK_UNK)
+
+	numSheets := int(binary.LittleEndian.Uint16(data[0:2]))
+	b.supbookCount++
+
+	// Check for internal 3D references
+	if len(data) >= 4 && data[2] == 0x01 && data[3] == 0x04 {
+		b.supbookTypes[len(b.supbookTypes)-1] = SUPBOOK_INTERNAL
+		supbookLocalsInx := b.supbookCount - 1
+		b.supbookLocalsInx = &supbookLocalsInx
+		return nil
+	}
+
+	// Check for add-in functions
+	if len(data) >= 4 && data[0] == 0x01 && data[1] == 0x00 && data[2] == 0x01 && data[3] == 0x3A {
+		b.supbookTypes[len(b.supbookTypes)-1] = SUPBOOK_ADDIN
+		supbookAddinsInx := b.supbookCount - 1
+		b.supbookAddinsInx = &supbookAddinsInx
+		return nil
+	}
+
+	// Parse URL for external references
+	_, pos, err := UnpackUnicodeUpdatePos(data, 2, 2, nil)
+	if err != nil {
+		return err
+	}
+
+	if numSheets == 0 {
+		// DDE/OLE document
+		b.supbookTypes[len(b.supbookTypes)-1] = SUPBOOK_DDEOLE
+		return nil
+	}
+
+	// External book
+	b.supbookTypes[len(b.supbookTypes)-1] = SUPBOOK_EXTERNAL
+
+	// Parse sheet names (simplified - not handling all edge cases)
+	for i := 0; i < numSheets && pos < len(data); i++ {
+		_, newPos, err := UnpackUnicodeUpdatePos(data, pos, 2, nil)
+		if err != nil {
+			break
+		}
+		pos = newPos
+	}
+
+	return nil
+}
+
+// handleExternname handles an EXTERNNAME record (external names).
+func (b *Book) handleExternname(data []byte) error {
+	if len(data) < 6 {
+		return nil
+	}
+
+	if b.BiffVersion >= 80 {
+		pos := 6
+		name, _, err := UnpackUnicodeUpdatePos(data, pos, 1, nil)
+		if err != nil {
+			return err
+		}
+
+		// Check if this is from an add-in supbook
+		if len(b.supbookTypes) > 0 && b.supbookTypes[len(b.supbookTypes)-1] == SUPBOOK_ADDIN {
+			b.addinFuncNames = append(b.addinFuncNames, name)
+		}
+	}
+
+	return nil
+}
+
+// handleExternsheet handles an EXTERNSHEET record (external sheet references).
+func (b *Book) handleExternsheet(data []byte) error {
+	b.extnshtCount++
+
+	if b.BiffVersion >= 80 {
+		// BIFF 8.0 and later
+		if len(data) < 2 {
+			return nil
+		}
+		numRefs := int(binary.LittleEndian.Uint16(data[0:2]))
+		pos := 2
+
+		for i := 0; i < numRefs && pos+6 <= len(data); i++ {
+			refRecordx := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+			refFirstSheetx := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+			refLastSheetx := int(binary.LittleEndian.Uint16(data[pos+4 : pos+6]))
+
+			info := []int{refRecordx, refFirstSheetx, refLastSheetx}
+			b.externsheetInfo = append(b.externsheetInfo, info)
+			pos += 6
+		}
+	} else {
+		// BIFF 7 and earlier
+		if len(data) >= 2 {
+			nc := int(data[0])
+			ty := int(data[1])
+			b.externsheetTypeB57 = append(b.externsheetTypeB57, ty)
+
+			if ty == 3 && len(data) >= nc+2 {
+				sheetName := string(data[2 : nc+2])
+				b.extnshtNameFromNum[b.extnshtCount] = sheetName
+			}
+		}
 	}
 
 	return nil
