@@ -24,29 +24,33 @@ func TestNamesDemo(t *testing.T) {
 }
 
 func TestRaggedRowsTidiedWithFormatting(t *testing.T) {
-	// For now, we just check this doesn't raise an error.
-	// TODO: Implement actual workbook opening
+	// Test that opening with formatting info doesn't cause errors
 	options := &OpenWorkbookOptions{
 		FormattingInfo: true,
 	}
-	_, err := OpenWorkbook(fromSample("issue20.xls"), options)
+	book, err := OpenWorkbook(fromSample("issue20.xls"), options)
 	if err != nil {
-		// Expected to fail until workbook opening is implemented
-		t.Logf("OpenWorkbook(issue20.xls) failed (expected): %v", err)
+		t.Fatalf("OpenWorkbook(issue20.xls) failed: %v", err)
 	}
+	if book == nil {
+		t.Fatal("OpenWorkbook returned nil book")
+	}
+	t.Logf("Successfully opened issue20.xls with formatting info")
 }
 
 func TestBYTESX00(t *testing.T) {
-	// For now, we just check this doesn't raise an error.
-	// TODO: Implement actual workbook opening
+	// Test that opening picture_in_cell.xls with formatting info doesn't cause errors
 	options := &OpenWorkbookOptions{
 		FormattingInfo: true,
 	}
-	_, err := OpenWorkbook(fromSample("picture_in_cell.xls"), options)
+	book, err := OpenWorkbook(fromSample("picture_in_cell.xls"), options)
 	if err != nil {
-		// Expected to fail until workbook opening is implemented
-		t.Logf("OpenWorkbook(picture_in_cell.xls) failed (expected): %v", err)
+		t.Fatalf("OpenWorkbook(picture_in_cell.xls) failed: %v", err)
 	}
+	if book == nil {
+		t.Fatal("OpenWorkbook returned nil book")
+	}
+	t.Logf("Successfully opened picture_in_cell.xls with formatting info")
 }
 
 func TestOpenXlsx(t *testing.T) {

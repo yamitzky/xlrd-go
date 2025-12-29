@@ -77,16 +77,22 @@ type Book struct {
 	LoadTimeStage2 float64
 
 	// Internal fields
-	sheetList   []*Sheet
-	sheetNames  []string
-	onDemand    bool
-	logfile     io.Writer
-	verbosity   int
-	mem         []byte
-	base        int
-	streamLen   int
-	position    int
-	filestr     []byte
+	sheetList        []*Sheet
+	sheetNames       []string
+	sheetAbsPosn     []int // Absolute positions of sheets in the stream
+	sheetVisibility  []int
+	onDemand         bool
+	logfile          io.Writer
+	verbosity        int
+	mem              []byte
+	base              int
+	streamLen         int
+	position          int
+	filestr           []byte
+	formattingInfo    bool
+	raggedRows        bool
+	encodingOverride  string
+	sharedStrings     []string
 }
 
 // Name represents information relating to a named reference, formula, macro, etc.
@@ -124,17 +130,36 @@ type Name struct {
 // Sheets returns a list of all sheets in the book.
 // All sheets not already loaded will be loaded.
 func (b *Book) Sheets() []*Sheet {
-	// Empty implementation for now
+	for sheetx := 0; sheetx < len(b.sheetList); sheetx++ {
+		if b.sheetList[sheetx] == nil {
+			sheet, err := b.getSheet(sheetx)
+			if err == nil {
+				b.sheetList[sheetx] = sheet
+			}
+		}
+	}
 	return b.sheetList
 }
 
 // SheetByIndex returns a sheet by its index.
 func (b *Book) SheetByIndex(sheetx int) (*Sheet, error) {
-	// Empty implementation for now
 	if sheetx < 0 || sheetx >= len(b.sheetList) {
 		return nil, NewXLRDError("sheet index %d out of range", sheetx)
 	}
-	return b.sheetList[sheetx], nil
+	
+	// If sheet is already loaded, return it
+	if b.sheetList[sheetx] != nil {
+		return b.sheetList[sheetx], nil
+	}
+	
+	// Load the sheet
+	sheet, err := b.getSheet(sheetx)
+	if err != nil {
+		return nil, err
+	}
+	
+	b.sheetList[sheetx] = sheet
+	return sheet, nil
 }
 
 // SheetByName returns a sheet by its name.
@@ -148,9 +173,22 @@ func (b *Book) SheetByName(sheetName string) (*Sheet, error) {
 	return nil, NewXLRDError("No sheet named <%s>", sheetName)
 }
 
-	// SheetNames returns a list of all sheet names.
+// SheetNames returns a list of all sheet names.
 func (b *Book) SheetNames() []string {
 	return b.sheetNames
+}
+
+// Get returns a sheet by index or name.
+// This implements Python-like indexing: book[0] or book["sheetname"]
+func (b *Book) Get(key interface{}) (*Sheet, error) {
+	switch k := key.(type) {
+	case int:
+		return b.SheetByIndex(k)
+	case string:
+		return b.SheetByName(k)
+	default:
+		return nil, NewXLRDError("Invalid key type for sheet access")
+	}
 }
 
 // SheetLoaded returns true if the sheet is loaded, false otherwise.
@@ -258,6 +296,9 @@ func OpenWorkbookXLS(filename string, options *OpenWorkbookOptions) (*Book, erro
 	bk.logfile = options.Logfile
 	bk.verbosity = options.Verbosity
 	bk.onDemand = options.OnDemand
+	bk.formattingInfo = options.FormattingInfo
+	bk.raggedRows = options.RaggedRows
+	bk.encodingOverride = options.EncodingOverride
 	
 	// Read file
 	fileContents, err := os.ReadFile(filename)
@@ -504,30 +545,53 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 		case XL_COUNTRY:
 			b.handleCountry(data)
 		case XL_WRITEACCESS:
-			// TODO: handle write access
+			b.handleWriteAccess(data)
 		case XL_FONT:
-			// TODO: handle font
+			err := b.handleFont(data)
+			if err != nil {
+				return err
+			}
 		case XL_FORMAT:
-			// TODO: handle format
+			err := b.handleFormat(data)
+			if err != nil {
+				return err
+			}
 		case XL_XF:
-			// TODO: handle XF
+			err := b.handleXF(data)
+			if err != nil {
+				return err
+			}
 		case XL_STYLE:
-			// TODO: handle style
+			err := b.handleStyle(data)
+			if err != nil {
+				return err
+			}
 		case XL_PALETTE:
-			// TODO: handle palette
+			err := b.handlePalette(data)
+			if err != nil {
+				return err
+			}
 		case XL_NAME:
-			// TODO: handle name
+			err := b.handleName(data)
+			if err != nil {
+				return err
+			}
 		case XL_EXTERNSHEET:
-			// TODO: handle externsheet
+			// TODO: handle externsheet - for now just skip
 		case XL_SUPBOOK:
-			// TODO: handle supbook
+			// TODO: handle supbook - for now just skip
+		case XL_SST:
+			err := b.handleSST(data)
+			if err != nil {
+				return err
+			}
 		}
-		
+
 		if code == XL_EOF {
 			break
 		}
 	}
-	
+
 	return nil
 }
 
@@ -535,41 +599,55 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 func (b *Book) handleBoundsheet(data []byte) error {
 	bv := b.BiffVersion
 	
+	var sheetName string
+	var visibility int
+	var absPosn int
+	var sheetType int
+	var err error
+	
 	if bv == 45 {
 		// BIFF 4W - only sheet name
-		sheetName, err := UnpackString(data, 0, b.Encoding, 1)
+		sheetName, err = UnpackString(data, 0, b.Encoding, 1)
 		if err != nil {
 			return err
 		}
-		b.sheetNames = append(b.sheetNames, sheetName)
-		b.sheetList = append(b.sheetList, nil)
-		return nil
-	}
-	
-	if len(data) < 6 {
-		return NewXLRDError("BOUNDSHEET record too short")
-	}
-	
-	offset := int(int32(binary.LittleEndian.Uint32(data[0:4])))
-	_ = int(data[4]) // visibility - not used yet
-	sheetType := int(data[5])
-	
-	_ = offset + b.base // absPosn - not used yet
-	
-	var sheetName string
-	var err error
-	if bv < BIFF_FIRST_UNICODE {
-		sheetName, err = UnpackString(data, 6, b.Encoding, 1)
+		visibility = 0
+		sheetType = XL_BOUNDSHEET_WORKSHEET // guess, patch later
+			if len(b.sheetAbsPosn) == 0 {
+				// For BIFF4W, sheets are embedded in the global stream
+				// _sheetsoffset would be calculated here, but for now use base
+				absPosn = b.base
+			// Note (a) this won't be used
+			// (b) it's the position of the SHEETHDR record
+			// (c) add 11 to get to the worksheet BOF record
+		} else {
+			absPosn = -1 // unknown
+		}
 	} else {
-		sheetName, err = UnpackUnicode(data, 6, 1)
-	}
-	if err != nil {
-		return err
+		if len(data) < 6 {
+			return NewXLRDError("BOUNDSHEET record too short")
+		}
+		
+		offset := int(int32(binary.LittleEndian.Uint32(data[0:4])))
+		visibility = int(data[4])
+		sheetType = int(data[5])
+		absPosn = offset + b.base // because global BOF is always at posn 0 in the stream
+		
+		if bv < BIFF_FIRST_UNICODE {
+			sheetName, err = UnpackString(data, 6, b.Encoding, 1)
+		} else {
+			sheetName, err = UnpackUnicode(data, 6, 1)
+		}
+		if err != nil {
+			return err
+		}
 	}
 	
 	if sheetType == XL_BOUNDSHEET_WORKSHEET {
 		b.sheetNames = append(b.sheetNames, sheetName)
 		b.sheetList = append(b.sheetList, nil)
+		b.sheetAbsPosn = append(b.sheetAbsPosn, absPosn)
+		b.sheetVisibility = append(b.sheetVisibility, visibility)
 	}
 	
 	return nil
@@ -602,6 +680,342 @@ func (b *Book) handleCountry(data []byte) {
 	}
 	b.Countries[0] = int(binary.LittleEndian.Uint16(data[0:2]))
 	b.Countries[1] = int(binary.LittleEndian.Uint16(data[2:4]))
+}
+
+// handleFont handles a FONT record.
+func (b *Book) handleFont(data []byte) error {
+	if len(data) < 14 {
+		return nil // Not enough data
+	}
+
+	font := &Font{}
+	pos := 0
+
+	// Height (2 bytes, little endian)
+	font.Height = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Option flags (2 bytes)
+	options := binary.LittleEndian.Uint16(data[pos : pos+2])
+	pos += 2
+
+	font.Bold = (options & 0x0001) != 0
+	font.Italic = (options & 0x0002) != 0
+	font.Underline = int((options & 0x000C) >> 2)
+	font.Escapement = int((options & 0x0070) >> 4)
+
+	// Colour index (2 bytes)
+	font.ColourIndex = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Weight (2 bytes)
+	font.Weight = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Escapement (1 byte, already handled in options)
+	pos += 1
+
+	// Underline (1 byte, already handled in options)
+	pos += 1
+
+	// Family (1 byte)
+	font.Family = int(data[pos])
+	pos += 1
+
+	// Character set (1 byte)
+	font.CharacterSet = int(data[pos])
+	pos += 1
+
+	// Reserved (1 byte)
+	pos += 1
+
+	// Font name length (1 byte)
+	nameLen := int(data[pos])
+	pos += 1
+
+	// Font name
+	if pos+nameLen <= len(data) {
+		// For BIFF8, font name is UTF-16LE encoded
+		if b.BiffVersion >= 80 {
+			font.Name = string(data[pos : pos+nameLen])
+		} else {
+			font.Name = string(data[pos : pos+nameLen])
+		}
+	}
+
+	b.FontList = append(b.FontList, font)
+	return nil
+}
+
+// handleFormat handles a FORMAT record.
+func (b *Book) handleFormat(data []byte) error {
+	if len(data) < 2 {
+		return nil
+	}
+
+	format := &Format{}
+	pos := 0
+
+	// Format index (2 bytes, but we use the list position)
+	// format.FormatKey = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Format string
+	if b.BiffVersion >= 80 {
+		// BIFF8: UTF-16LE encoded
+		if pos < len(data) {
+			formatString, err := UnpackUnicode(data, pos, 0)
+			if err == nil {
+				format.FormatString = formatString
+			}
+		}
+	} else {
+		// Earlier versions: byte string
+		if pos < len(data) {
+			strLen := int(data[pos])
+			pos++
+			if pos+strLen <= len(data) {
+				format.FormatString = string(data[pos : pos+strLen])
+			}
+		}
+	}
+
+	b.FormatList = append(b.FormatList, format)
+	return nil
+}
+
+// handleXF handles an XF (Extended Format) record.
+func (b *Book) handleXF(data []byte) error {
+	if len(data) < 16 {
+		return nil
+	}
+
+	xf := &XF{}
+	pos := 0
+
+	// Font index (2 bytes)
+	xf.FontIndex = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Format key (2 bytes)
+	xf.FormatKey = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Protection flags and other options (2 bytes)
+	protection := binary.LittleEndian.Uint16(data[pos : pos+2])
+	pos += 2
+
+	xf.Locked = (protection & 0x0001) != 0
+	xf.Hidden = (protection & 0x0002) != 0
+
+	// Alignment options (1 byte)
+	if pos < len(data) {
+		xf.Alignment = &XFAlignment{
+			Horizontal: int(data[pos] & 0x07),
+			Vertical:   int((data[pos] & 0x70) >> 4),
+		}
+		pos++
+	}
+
+	// Fill/rotation options (1 byte)
+	if pos < len(data) {
+		pos++ // Skip for now
+	}
+
+	// Border options (4 bytes)
+	if pos+4 <= len(data) {
+		xf.Border = &XFBorder{}
+		pos += 4
+	}
+
+	// Background options (2 bytes)
+	if pos+2 <= len(data) {
+		xf.Background = &XFBackground{}
+		pos += 2
+	}
+
+	b.XFList = append(b.XFList, xf)
+	return nil
+}
+
+// handleStyle handles a STYLE record.
+func (b *Book) handleStyle(data []byte) error {
+	if len(data) < 2 {
+		return nil
+	}
+
+	// For now, we just skip style records
+	// Style information is complex and not always needed
+	return nil
+}
+
+// handlePalette handles a PALETTE record.
+func (b *Book) handlePalette(data []byte) error {
+	if len(data) < 2 {
+		return nil
+	}
+
+	pos := 0
+	// Number of colors (2 bytes)
+	numColors := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	b.PaletteRecord = make([][3]int, 0, numColors)
+
+	// Each color is 4 bytes: RGB + reserved
+	for i := 0; i < numColors && pos+4 <= len(data); i++ {
+		r := int(data[pos])
+		g := int(data[pos+1])
+		b_val := int(data[pos+2])
+		b.PaletteRecord = append(b.PaletteRecord, [3]int{r, g, b_val})
+		pos += 4
+	}
+
+	return nil
+}
+
+// handleWriteAccess handles a WRITEACCESS record.
+func (b *Book) handleWriteAccess(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+
+	// For BIFF8, it's UTF-16LE encoded
+	if b.BiffVersion >= 80 {
+		// Simple conversion - in practice this would need proper UTF-16 handling
+		b.UserName = string(data)
+	} else {
+		b.UserName = string(data)
+	}
+}
+
+// handleName handles a NAME record.
+func (b *Book) handleName(data []byte) error {
+	if len(data) < 14 {
+		return nil
+	}
+
+	name := &Name{
+		Book: b,
+	}
+	pos := 0
+
+	// Options (2 bytes)
+	options := binary.LittleEndian.Uint16(data[pos : pos+2])
+	pos += 2
+
+	if (options & 0x0001) != 0 {
+		name.Hidden = 1
+	}
+	name.Func = int((options & 0x0002) >> 1)
+	name.VBasic = int((options & 0x0004) >> 2)
+	name.Macro = int((options & 0x0008) >> 3)
+
+	// Keyboard shortcut (1 byte)
+	pos++
+
+	// Length of name (1 byte)
+	nameLen := int(data[pos])
+	pos++
+
+	// Length of formula (2 bytes)
+	pos += 2
+
+	// Unused (2 bytes)
+	pos += 2
+
+	// Sheet index (2 bytes)
+	name.Scope = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+	pos += 2
+
+	// Name string
+	if pos+nameLen <= len(data) {
+		if b.BiffVersion >= 80 {
+			name.Name = string(data[pos : pos+nameLen])
+		} else {
+			name.Name = string(data[pos : pos+nameLen])
+		}
+	}
+
+	b.NameObjList = append(b.NameObjList, name)
+	return nil
+}
+
+// handleSST handles a Shared String Table record.
+func (b *Book) handleSST(data []byte) error {
+	if len(data) < 8 {
+		return nil // Not enough data
+	}
+
+	// Number of unique strings
+	numStrings := int(binary.LittleEndian.Uint32(data[0:4]))
+
+	b.sharedStrings = make([]string, 0, numStrings)
+
+	pos := 8 // Skip header
+
+	for i := 0; i < numStrings && pos < len(data); i++ {
+		if pos+2 > len(data) {
+			break
+		}
+
+		// Number of characters
+		nchars := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+
+		if pos >= len(data) {
+			break
+		}
+
+		// Options byte
+		options := data[pos]
+		pos++
+
+		// Skip richtext and phonetic info for now
+		if (options & 0x08) != 0 { // richtext
+			if pos+2 > len(data) {
+				break
+			}
+			pos += 2
+		}
+		if (options & 0x04) != 0 { // phonetic
+			if pos+4 > len(data) {
+				break
+			}
+			pos += 4
+		}
+
+		var str string
+		if (options & 0x01) != 0 { // Uncompressed UTF-16
+			strLen := nchars * 2
+			if pos+strLen > len(data) {
+				break
+			}
+			utf16Bytes := data[pos : pos+strLen]
+			// Simple UTF-16 LE to string conversion (basic implementation)
+			runes := make([]rune, 0, nchars)
+			for j := 0; j < len(utf16Bytes); j += 2 {
+				if j+1 >= len(utf16Bytes) {
+					break
+				}
+				u16 := binary.LittleEndian.Uint16(utf16Bytes[j : j+2])
+				runes = append(runes, rune(u16))
+			}
+			str = string(runes)
+			pos += strLen
+		} else { // Compressed (ASCII-like)
+			strLen := nchars
+			if pos+strLen > len(data) {
+				break
+			}
+			str = string(data[pos : pos+strLen])
+			pos += strLen
+		}
+
+		b.sharedStrings = append(b.sharedStrings, str)
+	}
+
+	return nil
 }
 
 // deriveEncoding derives the encoding from the codepage.
@@ -649,12 +1063,83 @@ func (b *Book) fakeGlobalsGetSheet() {
 	// For BIFF 4.0 and earlier, there's only one worksheet
 	b.sheetNames = []string{"Sheet1"}
 	b.sheetList = []*Sheet{nil}
+	b.sheetAbsPosn = []int{b.base}
+	b.sheetVisibility = []int{0}
 	b.NSheets = 1
+}
+
+// getSheet loads a sheet by its index.
+func (b *Book) getSheet(shNumber int) (*Sheet, error) {
+	if shNumber < 0 || shNumber >= len(b.sheetNames) {
+		return nil, NewXLRDError("sheet index %d out of range", shNumber)
+	}
+	
+	// Set position to sheet's absolute position
+	if shNumber >= len(b.sheetAbsPosn) {
+		return nil, NewXLRDError("sheet position not found for sheet %d", shNumber)
+	}
+	
+	b.position = b.sheetAbsPosn[shNumber]
+	
+	// Get BOF record for worksheet
+	_, err := b.getBOF(XL_WORKSHEET)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Create sheet
+	sheet := &Sheet{
+		Book:          b,
+		Name:          b.sheetNames[shNumber],
+		ColInfoMap:    make(map[int]*ColInfo),
+		RowInfoMap:    make(map[int]*RowInfo),
+		ColLabelRanges: make([][4]int, 0),
+		RowLabelRanges: make([][4]int, 0),
+		MergedCells:   make([][4]int, 0),
+	}
+	
+	// Read sheet data
+	err = sheet.read(b)
+	if err != nil {
+		return nil, err
+	}
+	
+	return sheet, nil
+}
+
+// getRecordParts reads the next BIFF record from the current position.
+func (b *Book) getRecordParts() (int, int, []byte) {
+	if b.position+4 > len(b.mem) {
+		return 0, 0, nil
+	}
+	code := int(binary.LittleEndian.Uint16(b.mem[b.position : b.position+2]))
+	length := int(binary.LittleEndian.Uint16(b.mem[b.position+2 : b.position+4]))
+	b.position += 4
+	if b.position+length > len(b.mem) {
+		return code, 0, nil
+	}
+	data := b.mem[b.position : b.position+length]
+	b.position += length
+	return code, length, data
 }
 
 // Colname returns the column name for a given column index (0-based).
 // Example: Colname(0) returns "A", Colname(25) returns "Z", Colname(26) returns "AA"
 func Colname(colx int) string {
-	// Empty implementation for now
-	return ""
+	if colx < 0 {
+		return ""
+	}
+
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	name := ""
+	for {
+		quot := colx / 26
+		rem := colx % 26
+		name = string(alphabet[rem]) + name
+		if quot == 0 {
+			break
+		}
+		colx = quot - 1
+	}
+	return name
 }
