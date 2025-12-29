@@ -1,9 +1,7 @@
 <header class="site-header">
   <div class="brand">
     <a href="{{ "/" | relURL }}" class="brand-link">{{ .Site.Title }}</a>
-    {{ with .Site.Params.description }}
-      <span class="brand-tagline">{{ . }}</span>
-    {{ end }}
+    <span class="brand-tagline">Go port of <a href="https://xlrd.readthedocs.io/en/latest/">xlrd</a> for reading XLS files</span>
   </div>
   {{ if .Site.Menus.main }}
     <nav class="site-nav">
