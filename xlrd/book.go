@@ -149,6 +149,12 @@ type Name struct {
 
 	// Formula is the formula text
 	Formula string
+
+	// RawFormula contains the raw formula bytes
+	RawFormula []byte
+
+	// BasicFormulaLen is the length of the basic formula
+	BasicFormulaLen int
 }
 
 // Sheets returns a list of all sheets in the book.

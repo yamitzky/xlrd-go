@@ -158,12 +158,9 @@ func (cd *CompDoc) locateStream(mem []byte, base int, sat []int, secSize int, st
 		}
 
 		// Check for corruption: if this sector has already been seen
-		if cd.seen[s] != 0 {
-			if !cd.IgnoreWorkbookCorruption {
-				fmt.Fprintf(cd.Logfile, "_locate_stream(%s): seen corruption at sector %d (value %d)\n", qname, s, cd.seen[s])
-				return nil, 0, 0, &CompDocError{
-					Message: fmt.Sprintf("%s corruption: seen[%d] == %d", qname, s, cd.seen[s]),
-				}
+		if cd.seen[s] != 0 && !cd.IgnoreWorkbookCorruption {
+			return nil, 0, 0, &CompDocError{
+				Message: fmt.Sprintf("%s corruption: seen[%d] == %d", qname, s, cd.seen[s]),
 			}
 		}
 		cd.seen[s] = seenID
@@ -321,20 +318,30 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		MSAT[i] = int(int32(binary.LittleEndian.Uint32(mem[76+i*4 : 80+i*4])))
 	}
 
-	// Handle MSAT extensions if present
-	MSATXFirstSecSID := int(int32(binary.LittleEndian.Uint32(mem[68:72])))
-	MSATXTotSecs := int(binary.LittleEndian.Uint32(mem[72:76]))
+		// Handle MSAT extensions if present
+		MSATXFirstSecSID := int(int32(binary.LittleEndian.Uint32(mem[68:72])))
+		MSATXTotSecs := int(binary.LittleEndian.Uint32(mem[72:76]))
 
-	if MSATXTotSecs > 0 && MSATXFirstSecSID >= 0 && MSATXFirstSecSID < memDataSecs {
-		sid := MSATXFirstSecSID
-		for i := 0; i < MSATXTotSecs && sid >= 0 && sid < memDataSecs; i++ {
-			if sid < len(cd.seen) && cd.seen[sid] != 0 {
-				// Corruption detected
-				break
-			}
-			if sid < len(cd.seen) {
+		// Check if MSAT extension exists
+		hasMSATExt := true
+		if MSATXTotSecs == 0 && (MSATXFirstSecSID == EOCSID || MSATXFirstSecSID == FREESID || MSATXFirstSecSID == 0) {
+			hasMSATExt = false // No extension
+		}
+
+		if hasMSATExt {
+			sid := MSATXFirstSecSID
+			for sid != EOCSID && sid != FREESID && sid != MSATSID {
+				if sid >= memDataSecs {
+					break // Invalid sector
+				}
+				if sid < 0 {
+					break // Invalid sector
+				}
+				if cd.seen[sid] != 0 {
+					// Corruption detected in MSAT
+					break
+				}
 				cd.seen[sid] = 1
-			}
 
 			offset := 512 + sid*cd.secSize
 			if offset+cd.secSize > len(mem) {
@@ -363,6 +370,11 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		if msid < 0 || msid >= memDataSecs {
 			continue
 		}
+		if cd.seen[msid] != 0 {
+			// Corruption detected in SAT
+			break
+		}
+		cd.seen[msid] = 2
 		offset := 512 + msid*cd.secSize
 		if offset+cd.secSize > len(mem) {
 			continue

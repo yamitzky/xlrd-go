@@ -591,8 +591,8 @@ func (s *Sheet) handleFormula(bk *Book, data []byte, dataLen int) {
 		}
 	}
 
-	// TODO: Formula bytecode parsing would go here for actual formula evaluation
-	// For now, we only use cached results as xlrd does
+	// xlrd does not evaluate formulas - it only reads cached results from Excel
+	// Formula evaluation is performed by Excel itself when the file was saved
 }
 
 // handleFormulaStringResult handles formulas that result in strings.
