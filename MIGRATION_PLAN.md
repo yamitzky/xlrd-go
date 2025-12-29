@@ -166,6 +166,17 @@ Each test file migration includes:
 - [ ] Update usage examples for Go
 - **Commit**: "Migrate documentation to Hugo"
 
+### Phase 6: CI/CD Migration to GitHub Actions
+- [ ] Create `.github/workflows/` directory
+- [ ] Create CI workflow (`.github/workflows/ci.yml`) with Go test matrix
+- [ ] Create release workflow (`.github/workflows/release.yml`) with GoReleaser
+- [ ] Create docs workflow (`.github/workflows/docs.yml`) for Hugo deployment
+- [ ] Configure Codecov integration for Go coverage
+- [ ] Update repository settings for GitHub Pages
+- [ ] Test all workflows
+- [ ] Remove CircleCI configuration (`.circleci/`)
+- **Commit**: "Migrate CI/CD from CircleCI to GitHub Actions"
+
 ## Key Implementation Details
 
 ### Date/Time Handling
