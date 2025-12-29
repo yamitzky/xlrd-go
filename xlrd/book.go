@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"unicode/utf16"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // Book represents the contents of a "workbook".
@@ -511,12 +514,8 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 	b.sheetNames = make([]string, 0)
 	b.sheetList = make([]*Sheet, 0)
 
-	// Set encoding with override if provided
-	if b.encodingOverride != "" {
-		b.Encoding = b.encodingOverride
-	} else {
-		b.Encoding = "iso-8859-1" // Default encoding
-	}
+	// Set encoding with override if provided, or derive from codepage
+	b.Encoding = b.deriveEncoding()
 	
 	for b.position < len(b.mem) {
 		if b.position+4 > len(b.mem) {
@@ -544,7 +543,6 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 			}
 		case XL_CODEPAGE:
 			b.handleCodepage(data)
-			b.Encoding = b.deriveEncoding()
 		case XL_DATEMODE:
 			b.handleDatemode(data)
 		case XL_COUNTRY:
@@ -997,23 +995,26 @@ func (b *Book) handleSST(data []byte) error {
 				break
 			}
 			utf16Bytes := data[pos : pos+strLen]
-			// Simple UTF-16 LE to string conversion (basic implementation)
-			runes := make([]rune, 0, nchars)
-			for j := 0; j < len(utf16Bytes); j += 2 {
-				if j+1 >= len(utf16Bytes) {
-					break
-				}
-				u16 := binary.LittleEndian.Uint16(utf16Bytes[j : j+2])
-				runes = append(runes, rune(u16))
+			// Convert UTF-16 LE to string
+			words := make([]uint16, nchars)
+			for j := 0; j < nchars; j++ {
+				words[j] = binary.LittleEndian.Uint16(utf16Bytes[j*2 : (j+1)*2])
 			}
-			str = string(runes)
+			str = string(utf16.Decode(words))
 			pos += strLen
-		} else { // Compressed (ASCII-like)
+		} else { // Compressed (Latin-1)
 			strLen := nchars
 			if pos+strLen > len(data) {
 				break
 			}
-			str = string(data[pos : pos+strLen])
+			// Convert Latin-1 to UTF-8
+			latin1Bytes := data[pos : pos+strLen]
+			utf8Bytes, err := charmap.ISO8859_1.NewDecoder().Bytes(latin1Bytes)
+			if err != nil {
+				str = string(latin1Bytes) // fallback
+			} else {
+				str = string(utf8Bytes)
+			}
 			pos += strLen
 		}
 

@@ -6,7 +6,7 @@ import (
 
 func TestTextCells(t *testing.T) {
 	// Temporarily skip this test due to encoding issues
-	t.Skip("Skipping due to UTF-16 encoding issues with German umlauts")
+	// t.Skip("Skipping due to UTF-16 encoding issues with German umlauts")
 	book, err := OpenWorkbook(fromSample("Formate.xls"), &OpenWorkbookOptions{FormattingInfo: true, EncodingOverride: "utf_16_le"})
 	if err != nil {
 		t.Fatalf("Failed to open workbook: %v", err)

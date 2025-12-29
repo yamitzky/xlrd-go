@@ -3,7 +3,10 @@ package xlrd
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 	"unicode/utf16"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // UnpackString unpacks a string from BIFF data.
@@ -35,7 +38,10 @@ func UnpackString(data []byte, pos int, encoding string, lenlen int) (string, er
 		for i := 0; i < len(words); i++ {
 			words[i] = binary.LittleEndian.Uint16(strBytes[i*2 : (i+1)*2])
 		}
-		return string(utf16.Decode(words)), nil
+		result := string(utf16.Decode(words))
+		// Debug: log hex dump of input bytes and result
+		fmt.Fprintf(os.Stderr, "DEBUG UnpackString: input bytes: %x, result: %q\n", strBytes, result)
+		return result, nil
 	}
 	
 	// For other encodings, treat as Latin-1 for now
@@ -139,7 +145,12 @@ func UnpackUnicode(data []byte, pos int, lenlen int) (string, error) {
 		if pos+nchars > len(data) {
 			return "", fmt.Errorf("insufficient data for compressed string")
 		}
-		return string(data[pos : pos+nchars]), nil
+		latin1Bytes := data[pos : pos+nchars]
+		utf8Bytes, err := charmap.ISO8859_1.NewDecoder().Bytes(latin1Bytes)
+		if err != nil {
+			return "", fmt.Errorf("failed to decode Latin-1: %v", err)
+		}
+		return string(utf8Bytes), nil
 	}
 }
 

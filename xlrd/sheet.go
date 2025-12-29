@@ -391,11 +391,10 @@ func (s *Sheet) read(bk *Book) error {
 				rowx := int(binary.LittleEndian.Uint16(data[0:2]))
 				colx := int(binary.LittleEndian.Uint16(data[2:4]))
 				xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
-				// Parse string (simplified)
+				// Parse string using UnpackString
 				if dataLen > 6 {
-					strLen := int(data[6])
-					if strLen > 0 && 7+strLen <= dataLen {
-						value := string(data[7 : 7+strLen])
+					value, err := UnpackString(data, 6, bk.Encoding, 1)
+					if err == nil && value != "" {
 						s.putCell(rowx, colx, XL_CELL_TEXT, value, xfIndex)
 					}
 				}
