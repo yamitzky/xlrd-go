@@ -510,8 +510,13 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 	b.initializeFormatInfo()
 	b.sheetNames = make([]string, 0)
 	b.sheetList = make([]*Sheet, 0)
-	
-	b.Encoding = "iso-8859-1" // Default encoding
+
+	// Set encoding with override if provided
+	if b.encodingOverride != "" {
+		b.Encoding = b.encodingOverride
+	} else {
+		b.Encoding = "iso-8859-1" // Default encoding
+	}
 	
 	for b.position < len(b.mem) {
 		if b.position+4 > len(b.mem) {
@@ -1020,6 +1025,9 @@ func (b *Book) handleSST(data []byte) error {
 
 // deriveEncoding derives the encoding from the codepage.
 func (b *Book) deriveEncoding() string {
+	if b.encodingOverride != "" {
+		return b.encodingOverride
+	}
 	if b.Codepage == nil {
 		if b.BiffVersion < 80 {
 			return "iso-8859-1"
