@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"unicode/utf16"
 
 	"golang.org/x/text/encoding/charmap"
@@ -16,6 +17,7 @@ const (
 	SUPBOOK_EXTERNAL = 2
 	SUPBOOK_ADDIN    = 3
 	SUPBOOK_DDEOLE   = 4
+	MY_EOF           = 0xF00BAAA // not a 16-bit number
 )
 
 // Book represents the contents of a "workbook".
@@ -107,6 +109,19 @@ type Book struct {
 	ignoreWorkbookCorruption bool
 	sharedStrings            []string
 
+	// Name mappings
+	nameAndScopeMap map[string]map[int]*Name // maps (lower_case_name, scope) to Name object
+	nameMap         map[string][]*Name       // maps lower_case_name to list of Name objects
+
+	// Processing flags
+	xfEpilogueDone    bool // whether XF epilogue has been processed
+	resourcesReleased bool // whether resources have been released
+
+	// BIFF format information
+	builtinfmtcount int // number of built-in formats (BIFF 3, 4S, 4W)
+	sheethdrCount   int // BIFF 4W only
+	sheetsoffset    int // sheet offset for BIFF 4W
+
 	// External reference handling
 	supbookCount       int
 	supbookLocalsInx   *int
@@ -138,6 +153,21 @@ type Name struct {
 	// Macro: 0 = Standard name; 1 = Macro name
 	Macro int
 
+	// Complex: 0 = Simple formula; 1 = Complex formula (array formula or user defined)
+	Complex int
+
+	// Builtin: 0 = User-defined name; 1 = Built-in name
+	Builtin int
+
+	// Funcgroup: Function group. Relevant only if macro == 1
+	Funcgroup int
+
+	// Binary: 0 = Formula definition; 1 = Binary data
+	Binary int
+
+	// NameIndex: The index of this object in book.name_obj_list
+	NameIndex int
+
 	// Name is the name of the object
 	Name string
 
@@ -157,15 +187,29 @@ type Name struct {
 	BasicFormulaLen int
 }
 
+// Cell returns a single cell that the name refers to.
+// This is a convenience method for names that refer to a single cell.
+func (n *Name) Cell() (*Cell, error) {
+	// Note: Full implementation requires formula evaluation
+	// For now, return an error indicating this feature is not yet implemented
+	return nil, NewXLRDError("Name.Cell() not yet implemented - requires formula evaluation")
+}
+
+// Area2D returns a rectangular area that the name refers to.
+// Returns (sheet, rowxlo, rowxhi, colxlo, colxhi)
+func (n *Name) Area2D(clipped bool) (*Sheet, int, int, int, int, error) {
+	// Note: Full implementation requires formula evaluation
+	// For now, return an error indicating this feature is not yet implemented
+	return nil, 0, 0, 0, 0, NewXLRDError("Name.Area2D() not yet implemented - requires formula evaluation")
+}
+
 // Sheets returns a list of all sheets in the book.
 // All sheets not already loaded will be loaded.
 func (b *Book) Sheets() []*Sheet {
 	for sheetx := 0; sheetx < len(b.sheetList); sheetx++ {
 		if b.sheetList[sheetx] == nil {
-			sheet, err := b.getSheet(sheetx)
-			if err == nil {
-				b.sheetList[sheetx] = sheet
-			}
+			sheet, _ := b.getSheet(sheetx)
+			b.sheetList[sheetx] = sheet
 		}
 	}
 	return b.sheetList
@@ -216,19 +260,61 @@ func (b *Book) Get(key interface{}) (*Sheet, error) {
 
 // SheetLoaded returns true if the sheet is loaded, false otherwise.
 func (b *Book) SheetLoaded(sheetNameOrIndex interface{}) (bool, error) {
-	// Empty implementation for now
-	return false, nil
+	var sheetx int
+
+	switch v := sheetNameOrIndex.(type) {
+	case int:
+		sheetx = v
+	case string:
+		for i, name := range b.sheetNames {
+			if name == v {
+				sheetx = i
+				goto found
+			}
+		}
+		return false, NewXLRDError("No sheet named <%s>", v)
+	}
+
+found:
+	if sheetx < 0 || sheetx >= len(b.sheetList) {
+		return false, NewXLRDError("sheet index %d out of range", sheetx)
+	}
+	return b.sheetList[sheetx] != nil, nil
 }
 
 // UnloadSheet unloads a sheet by name or index.
 func (b *Book) UnloadSheet(sheetNameOrIndex interface{}) error {
-	// Empty implementation for now
+	var sheetx int
+
+	switch v := sheetNameOrIndex.(type) {
+	case int:
+		sheetx = v
+	case string:
+		for i, name := range b.sheetNames {
+			if name == v {
+				sheetx = i
+				goto found
+			}
+		}
+		return NewXLRDError("No sheet named <%s>", v)
+	}
+
+found:
+	if sheetx < 0 || sheetx >= len(b.sheetList) {
+		return NewXLRDError("sheet index %d out of range", sheetx)
+	}
+	b.sheetList[sheetx] = nil
 	return nil
 }
 
 // ReleaseResources releases memory-consuming objects and possibly a memory-mapped file.
 func (b *Book) ReleaseResources() {
-	// Empty implementation for now
+	b.resourcesReleased = true
+	// Note: In Go, memory management is automatic, so we mainly set flags
+	// If there were mmap objects, they would be closed here
+	b.mem = nil
+	b.filestr = nil
+	b.sharedStrings = nil
 }
 
 // GetBOF gets the BOF (Beginning of File) record for a given sheet type.
@@ -658,6 +744,22 @@ func (b *Book) parseGlobalsRecords(options *OpenWorkbookOptions) error {
 			if err != nil {
 				return err
 			}
+		case XL_BUILTINFMTCOUNT:
+			b.handleBuiltinfmtcount(data)
+		case XL_FILEPASS:
+			err := b.handleFilepass(data)
+			if err != nil {
+				return err
+			}
+		case XL_OBJ:
+			b.handleObj(data)
+		case XL_SHEETHDR:
+			err := b.handleSheethdr(data)
+			if err != nil {
+				return err
+			}
+		case XL_SHEETSOFFSET:
+			b.handleSheetsoffset(data)
 		}
 
 		if code == XL_EOF {
@@ -1024,6 +1126,108 @@ func (b *Book) handleName(data []byte) error {
 	return nil
 }
 
+// handleBuiltinfmtcount handles a BUILTINFMTCOUNT record.
+func (b *Book) handleBuiltinfmtcount(data []byte) {
+	// N.B. This count appears to be utterly useless.
+	if len(data) >= 2 {
+		b.builtinfmtcount = int(binary.LittleEndian.Uint16(data[0:2]))
+		if b.verbosity >= 2 {
+			fmt.Fprintf(b.logfile, "BUILTINFMTCOUNT: %d\n", b.builtinfmtcount)
+		}
+	}
+}
+
+// handleFilepass handles a FILEPASS record (file encryption).
+func (b *Book) handleFilepass(data []byte) error {
+	if b.verbosity >= 2 {
+		logf := b.logfile
+		fmt.Fprintf(logf, "FILEPASS:\n")
+		// Note: hex dump implementation would be needed here
+		if b.BiffVersion >= 80 {
+			if len(data) >= 2 {
+				kind1 := binary.LittleEndian.Uint16(data[:2])
+				if kind1 == 0 { // weak XOR encryption
+					if len(data) >= 6 {
+						key := binary.LittleEndian.Uint16(data[2:4])
+						hashValue := binary.LittleEndian.Uint16(data[4:6])
+						fmt.Fprintf(logf, "weak XOR: key=0x%04x hash=0x%04x\n", key, hashValue)
+					}
+				} else if kind1 == 1 {
+					if len(data) >= 6 {
+						kind2 := binary.LittleEndian.Uint16(data[4:6])
+						var caption string
+						if kind2 == 1 { // BIFF8 standard encryption
+							caption = "BIFF8 std"
+						} else if kind2 == 2 {
+							caption = "BIFF8 strong"
+						} else {
+							caption = "** UNKNOWN ENCRYPTION METHOD **"
+						}
+						fmt.Fprintf(logf, "%s\n", caption)
+					}
+				}
+			}
+		}
+	}
+	return NewXLRDError("Workbook is encrypted")
+}
+
+// handleObj handles an OBJ record.
+// Not doing much handling at all. Worrying about embedded (BOF ... EOF) substreams is done elsewhere.
+func (b *Book) handleObj(data []byte) {
+	// Not doing much handling at all.
+	// Worrying about embedded (BOF ... EOF) substreams is done elsewhere.
+	if len(data) >= 10 {
+		objType := binary.LittleEndian.Uint16(data[4:6])
+		objId := binary.LittleEndian.Uint32(data[6:10])
+		// Debug print would go here if needed
+		_ = objType
+		_ = objId
+	}
+}
+
+// handleSheethdr handles a SHEETHDR record (BIFF 4W special).
+func (b *Book) handleSheethdr(data []byte) error {
+	// This a BIFF 4W special.
+	// The SHEETHDR record is followed by a (BOF ... EOF) substream containing a worksheet.
+	if len(data) < 4 {
+		return NewXLRDError("SHEETHDR record too short")
+	}
+
+	sheetLen := int(binary.LittleEndian.Uint32(data[:4]))
+	sheetName, err := UnpackString(data, 4, b.Encoding, 1)
+	if err != nil {
+		return err
+	}
+
+	sheetno := b.sheethdrCount
+	if sheetName != b.sheetNames[sheetno] {
+		return NewXLRDError("SHEETHDR name mismatch")
+	}
+	b.sheethdrCount++
+
+	BOFPosn := b.position
+	// posn := BOFPosn - 4 - len(data) // Not used in Go implementation
+
+	b.initializeFormatInfo()
+	b.sheetList = append(b.sheetList, nil) // get_sheet updates _sheet_list but needs a None beforehand
+	_, err = b.getSheet(sheetno, false)
+	if err != nil {
+		return err
+	}
+
+	b.position = BOFPosn + sheetLen
+	return nil
+}
+
+// handleSheetsoffset handles a SHEETSOFFSET record.
+func (b *Book) handleSheetsoffset(data []byte) {
+	if len(data) >= 4 {
+		posn := int(binary.LittleEndian.Uint32(data[:4]))
+		b.sheetsoffset = posn
+	}
+}
+
 // handleSST handles a Shared String Table record.
 func (b *Book) handleSST(data []byte) error {
 	if len(data) < 8 {
@@ -1272,7 +1476,11 @@ func (b *Book) fakeGlobalsGetSheet() {
 }
 
 // getSheet loads a sheet by its index.
-func (b *Book) getSheet(shNumber int) (*Sheet, error) {
+func (b *Book) getSheet(shNumber int, updatePos ...bool) (*Sheet, error) {
+	updatePosition := true
+	if len(updatePos) > 0 {
+		updatePosition = updatePos[0]
+	}
 	if shNumber < 0 || shNumber >= len(b.sheetNames) {
 		return nil, NewXLRDError("sheet index %d out of range", shNumber)
 	}
@@ -1282,7 +1490,9 @@ func (b *Book) getSheet(shNumber int) (*Sheet, error) {
 		return nil, NewXLRDError("sheet position not found for sheet %d", shNumber)
 	}
 
-	b.position = b.sheetAbsPosn[shNumber]
+	if updatePosition {
+		b.position = b.sheetAbsPosn[shNumber]
+	}
 
 	// Get BOF record for worksheet
 	_, err := b.getBOF(XL_WORKSHEET)
@@ -1334,6 +1544,193 @@ func (b *Book) readWorksheets(options *OpenWorkbookOptions) error {
 	return nil
 }
 
+// get2bytes reads 2 bytes from the current position and advances the position.
+func (b *Book) get2bytes() int {
+	if b.position+2 > len(b.mem) {
+		return MY_EOF
+	}
+	result := int(binary.LittleEndian.Uint16(b.mem[b.position : b.position+2]))
+	b.position += 2
+	return result
+}
+
+// getRecordPartsConditional reads a record only if it matches the required record type.
+func (b *Book) getRecordPartsConditional(reqdRecord int) (int, int, []byte) {
+	if b.position+4 > len(b.mem) {
+		return 0, 0, nil
+	}
+	code := int(binary.LittleEndian.Uint16(b.mem[b.position : b.position+2]))
+	length := int(binary.LittleEndian.Uint16(b.mem[b.position+2 : b.position+4]))
+	if code != reqdRecord {
+		return 0, 0, nil
+	}
+	b.position += 4
+	if b.position+length > len(b.mem) {
+		return code, 0, nil
+	}
+	data := b.mem[b.position : b.position+length]
+	b.position += length
+	return code, length, data
+}
+
+// read reads data from the specified position and advances the current position.
+func (b *Book) read(pos, length int) []byte {
+	if pos+length > len(b.mem) {
+		length = len(b.mem) - pos
+	}
+	data := b.mem[pos : pos+length]
+	b.position = pos + len(data)
+	return data
+}
+
+// biff2_8_load loads BIFF data from file or file contents.
+// This method handles the core file loading logic.
+func (b *Book) biff2_8_load(filename string, fileContents []byte,
+	logfile io.Writer, verbosity int, useMmap bool,
+	encodingOverride string,
+	formattingInfo bool,
+	onDemand bool,
+	raggedRows bool,
+	ignoreWorkbookCorruption bool) error {
+
+	b.logfile = logfile
+	b.verbosity = verbosity
+	b.formattingInfo = formattingInfo
+	b.onDemand = onDemand
+	b.raggedRows = raggedRows
+	b.encodingOverride = encodingOverride
+	b.ignoreWorkbookCorruption = ignoreWorkbookCorruption
+
+	if fileContents == nil {
+		// Read from file
+		content, err := os.ReadFile(filename)
+		if err != nil {
+			return err
+		}
+		if len(content) == 0 {
+			return NewXLRDError("File size is 0 bytes")
+		}
+		b.filestr = content
+		b.streamLen = len(content)
+	} else {
+		b.filestr = fileContents
+		b.streamLen = len(fileContents)
+	}
+
+	b.base = 0
+	if len(b.filestr) >= 8 && string(b.filestr[:8]) == string(XLS_SIGNATURE) {
+		// OLE2 compound document
+		cd, err := NewCompDoc(b.filestr, logfile, 0, ignoreWorkbookCorruption)
+		if err != nil {
+			return err
+		}
+
+		// Try to locate Workbook or Book stream
+		var mem []byte
+		var base, streamLen int
+		var lastErr error
+		for _, qname := range []string{"Workbook", "Book"} {
+			mem, base, streamLen, err = cd.LocateNamedStream(qname)
+			if err == nil && mem != nil {
+				break
+			}
+			if err != nil {
+				lastErr = err
+				if compDocErr, ok := err.(*CompDocError); ok && !ignoreWorkbookCorruption {
+					return compDocErr
+				}
+			}
+		}
+
+		if mem == nil {
+			if lastErr != nil {
+				return lastErr
+			}
+			return NewXLRDError("Can't find workbook in OLE2 compound document")
+		}
+
+		b.mem = mem
+		b.base = base
+		b.streamLen = streamLen
+	} else {
+		// Not an OLE2 compound document - treat as raw BIFF file
+		b.mem = b.filestr
+		b.base = 0
+		b.streamLen = len(b.filestr)
+	}
+
+	b.position = b.base
+	return nil
+}
+
+// namesEpilogue processes NAME records and builds mapping dictionaries.
+func (b *Book) namesEpilogue() {
+	if b.verbosity >= 2 {
+		fmt.Fprintf(b.logfile, "+++++ names_epilogue +++++\n")
+	}
+
+	// Note: Scope handling is already done during handleName
+	// Additional BIFF version-specific handling could be added here if needed
+
+	// Build mapping dictionaries
+	b.nameAndScopeMap = make(map[string]map[int]*Name)
+	b.nameMap = make(map[string][]*Name)
+
+	for namex := 0; namex < len(b.NameObjList); namex++ {
+		nobj := b.NameObjList[namex]
+		nameLcase := strings.ToLower(nobj.Name)
+
+		// name_and_scope_map: (name.lower(), scope) -> Name object
+		if b.nameAndScopeMap[nameLcase] == nil {
+			b.nameAndScopeMap[nameLcase] = make(map[int]*Name)
+		}
+		if _, exists := b.nameAndScopeMap[nameLcase][nobj.Scope]; exists && b.verbosity >= 1 {
+			fmt.Fprintf(b.logfile, "Duplicate entry (%s, %d) in name_and_scope_map\n", nameLcase, nobj.Scope)
+		}
+		b.nameAndScopeMap[nameLcase][nobj.Scope] = nobj
+
+		// name_map: name.lower() -> list of Name objects (sorted by scope)
+		if b.nameMap[nameLcase] == nil {
+			b.nameMap[nameLcase] = []*Name{}
+		}
+		// Insert in sorted order by scope
+		inserted := false
+		for i, existing := range b.nameMap[nameLcase] {
+			if existing.Scope > nobj.Scope {
+				// Insert before this element
+				b.nameMap[nameLcase] = append(b.nameMap[nameLcase][:i], append([]*Name{nobj}, b.nameMap[nameLcase][i:]...)...)
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			b.nameMap[nameLcase] = append(b.nameMap[nameLcase], nobj)
+		}
+	}
+
+	if b.verbosity >= 2 {
+		fmt.Fprintf(b.logfile, "---------- name object dump ----------\n")
+		for namex := 0; namex < len(b.NameObjList); namex++ {
+			nobj := b.NameObjList[namex]
+			fmt.Fprintf(b.logfile, "--- name[%d]: %s ---\n", namex, nobj.Name)
+		}
+		fmt.Fprintf(b.logfile, "--------------------------------------\n")
+	}
+}
+
+// xfEpilogue processes extended format information after all XF records are read.
+func (b *Book) xfEpilogue() {
+	// XF epilogue processing - currently minimal implementation
+	// In full implementation, this would handle XF record post-processing
+	b.xfEpilogueDone = true
+}
+
+// paletteEpilogue processes palette information after all records are read.
+func (b *Book) paletteEpilogue() {
+	// Palette epilogue processing - currently minimal implementation
+	// In full implementation, this would finalize palette mappings
+}
+
 // getRecordParts reads the next BIFF record from the current position.
 func (b *Book) getRecordParts() (int, int, []byte) {
 	if b.position+4 > len(b.mem) {
@@ -1348,6 +1745,201 @@ func (b *Book) getRecordParts() (int, int, []byte) {
 	data := b.mem[b.position : b.position+length]
 	b.position += length
 	return code, length, data
+}
+
+// ExpandCellAddress expands a cell address from BIFF format.
+// Ref: OOo docs, "4.3.4 Cell Addresses in BIFF8"
+// Returns: outrow, outcol, relrow, relcol
+func ExpandCellAddress(inrow, incol int) (int, int, int, int) {
+	outrow := inrow
+	var relrow int
+	if incol&0x8000 != 0 {
+		if outrow >= 32768 {
+			outrow -= 65536
+		}
+		relrow = 1
+	} else {
+		relrow = 0
+	}
+
+	outcol := incol & 0xFF
+	var relcol int
+	if incol&0x4000 != 0 {
+		if outcol >= 128 {
+			outcol -= 256
+		}
+		relcol = 1
+	} else {
+		relcol = 0
+	}
+
+	return outrow, outcol, relrow, relcol
+}
+
+// UnpackSSTTable unpacks the Shared String Table from SST record data.
+// Returns list of strings and rich text run information.
+func UnpackSSTTable(datatab [][]byte, nstrings int) ([]string, map[int][][]int) {
+	if len(datatab) == 0 {
+		return []string{}, make(map[int][][]int)
+	}
+
+	datainx := 0
+	ndatas := len(datatab)
+	data := datatab[0]
+	datalen := len(data)
+	pos := 8
+
+	strings := make([]string, 0, nstrings)
+	richtextRuns := make(map[int][][]int)
+
+	for i := 0; i < nstrings; i++ {
+		if pos+2 > datalen {
+			break
+		}
+
+		// Number of characters
+		nchars := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+		pos += 2
+
+		if pos >= datalen {
+			break
+		}
+
+		// Options byte
+		options := data[pos]
+		pos++
+
+		rtcount := 0
+		if options&0x08 != 0 { // richtext
+			if pos+2 > datalen {
+				break
+			}
+			rtcount = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+			pos += 2
+		}
+
+		if options&0x04 != 0 { // phonetic
+			if pos+4 > datalen {
+				break
+			}
+			pos += 4 // Skip phonetic size
+		}
+
+		var accstrg string
+		charsgot := 0
+
+		for charsgot < nchars {
+			charsneed := nchars - charsgot
+			charsavail := 0
+
+			if options&0x01 != 0 {
+				// Uncompressed UTF-16
+				charsavail = min((datalen-pos)>>1, charsneed)
+				if pos+2*charsavail > datalen {
+					break
+				}
+				rawstrg := data[pos : pos+2*charsavail]
+				// Convert UTF-16 LE to string
+				words := make([]uint16, charsavail)
+				for j := 0; j < charsavail; j++ {
+					words[j] = binary.LittleEndian.Uint16(rawstrg[j*2 : (j+1)*2])
+				}
+				accstrg += string(utf16.Decode(words))
+				pos += 2 * charsavail
+			} else {
+				// Compressed (Latin-1)
+				charsavail = min(datalen-pos, charsneed)
+				if pos+charsavail > datalen {
+					break
+				}
+				rawstrg := data[pos : pos+charsavail]
+				// Convert Latin-1 to UTF-8
+				utf8Bytes, err := charmap.ISO8859_1.NewDecoder().Bytes(rawstrg)
+				if err != nil {
+					accstrg += string(rawstrg) // fallback
+				} else {
+					accstrg += string(utf8Bytes)
+				}
+				pos += charsavail
+			}
+
+			charsgot += charsavail
+
+			if charsgot == nchars {
+				break
+			}
+
+			// Move to next data block
+			datainx++
+			if datainx < ndatas {
+				data = datatab[datainx]
+				datalen = len(data)
+				if datalen > 0 {
+					options = data[0]
+					pos = 1
+				}
+			} else {
+				break
+			}
+		}
+
+		if rtcount > 0 {
+			runs := make([][]int, 0, rtcount)
+			for runindex := 0; runindex < rtcount; runindex++ {
+				if pos+4 > datalen {
+					break
+				}
+				run1 := int(binary.LittleEndian.Uint16(data[pos : pos+2]))
+				run2 := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
+				runs = append(runs, []int{run1, run2})
+				pos += 4
+			}
+			richtextRuns[len(strings)] = runs
+		}
+
+		// Skip phonetic data
+		if options&0x04 != 0 {
+			// Skip remaining phonetic data if any
+			for pos >= datalen && datainx+1 < ndatas {
+				pos -= datalen
+				datainx++
+				data = datatab[datainx]
+				datalen = len(data)
+			}
+		}
+
+		strings = append(strings, accstrg)
+	}
+
+	return strings, richtextRuns
+}
+
+// Iter returns an iterator over all sheets in the book.
+// This provides Python-like iteration: for sheet := range book.Iter()
+func (b *Book) Iter() <-chan *Sheet {
+	ch := make(chan *Sheet)
+	go func() {
+		defer close(ch)
+		for i := 0; i < b.NSheets; i++ {
+			sheet, err := b.SheetByIndex(i)
+			if err == nil {
+				ch <- sheet
+			}
+		}
+	}()
+	return ch
+}
+
+// Enter implements context manager enter (Python __enter__).
+// Returns the book itself for use in with statements.
+func (b *Book) Enter() *Book {
+	return b
+}
+
+// Exit implements context manager exit (Python __exit__).
+// Automatically releases resources.
+func (b *Book) Exit() {
+	b.ReleaseResources()
 }
 
 // Colname returns the column name for a given column index (0-based).

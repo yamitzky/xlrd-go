@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-
 // hexCharDump dumps data in hex and character format
 func hexCharDump(data []byte, offset, length int, base int, outfile io.Writer, unnumbered bool) {
 	endPos := min(offset+length, len(data))
