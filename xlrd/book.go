@@ -216,7 +216,6 @@ type OpenWorkbookOptions struct {
 //
 // Returns: An instance of the Book class.
 func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) {
-	// Empty implementation for now
 	if options == nil {
 		options = &OpenWorkbookOptions{
 			Logfile: os.Stdout,
@@ -228,7 +227,11 @@ func OpenWorkbook(filename string, options *OpenWorkbookOptions) (*Book, error) 
 		return nil, err
 	}
 
-	if fileFormat != "" && fileFormat != "xls" {
+	if fileFormat == "" {
+		return nil, NewXLRDError("Unsupported format, or corrupt file")
+	}
+
+	if fileFormat != "xls" {
 		return nil, NewXLRDError("%s; not supported", FileFormatDescriptions[fileFormat])
 	}
 

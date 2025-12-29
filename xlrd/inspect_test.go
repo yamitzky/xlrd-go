@@ -2,19 +2,8 @@ package xlrd
 
 import (
 	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 )
-
-func fromSample(filename string) string {
-	// Get the directory of this test file
-	_, testFile, _, _ := runtime.Caller(0)
-	testDir := filepath.Dir(testFile)
-	// Go up to project root (xlrd -> project root)
-	projectRoot := filepath.Join(testDir, "..")
-	return filepath.Join(projectRoot, "testdata", "samples", filename)
-}
 
 func TestXlsx(t *testing.T) {
 	format, err := InspectFormat(fromSample("sample.xlsx"), nil)
