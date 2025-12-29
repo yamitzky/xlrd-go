@@ -144,9 +144,32 @@ func (b *Book) SheetByName(sheetName string) (*Sheet, error) {
 	return nil, NewXLRDError("No sheet named <%s>", sheetName)
 }
 
-// SheetNames returns a list of all sheet names.
+	// SheetNames returns a list of all sheet names.
 func (b *Book) SheetNames() []string {
 	return b.sheetNames
+}
+
+// SheetLoaded returns true if the sheet is loaded, false otherwise.
+func (b *Book) SheetLoaded(sheetNameOrIndex interface{}) (bool, error) {
+	// Empty implementation for now
+	return false, nil
+}
+
+// UnloadSheet unloads a sheet by name or index.
+func (b *Book) UnloadSheet(sheetNameOrIndex interface{}) error {
+	// Empty implementation for now
+	return nil
+}
+
+// ReleaseResources releases memory-consuming objects and possibly a memory-mapped file.
+func (b *Book) ReleaseResources() {
+	// Empty implementation for now
+}
+
+// GetBOF gets the BOF (Beginning of File) record for a given sheet type.
+func (b *Book) GetBOF(sheetType int) int {
+	// Empty implementation for now
+	return 0
 }
 
 // OpenWorkbookOptions contains options for opening a workbook.

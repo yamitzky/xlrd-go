@@ -113,6 +113,48 @@ func (s *Sheet) RowLen(rowx int) int {
 	return 0
 }
 
+// RowTypes returns a slice of the types of the cells in the given row.
+func (s *Sheet) RowTypes(rowx, startColx int, endColx *int) []int {
+	// Empty implementation for now
+	return []int{}
+}
+
+// RowValues returns a slice of the values of the cells in the given row.
+func (s *Sheet) RowValues(rowx, startColx int, endColx *int) []interface{} {
+	// Empty implementation for now
+	return []interface{}{}
+}
+
+// RowSlice returns a slice of the Cell objects in the given row.
+func (s *Sheet) RowSlice(rowx, startColx int, endColx *int) []*Cell {
+	// Empty implementation for now
+	return []*Cell{}
+}
+
+// ColSlice returns a slice of the Cell objects in the given column.
+func (s *Sheet) ColSlice(colx, startRowx int, endRowx *int) []*Cell {
+	// Empty implementation for now
+	return []*Cell{}
+}
+
+// ColValues returns a slice of the values of the cells in the given column.
+func (s *Sheet) ColValues(colx, startRowx int, endRowx *int) []interface{} {
+	// Empty implementation for now
+	return []interface{}{}
+}
+
+// ColTypes returns a slice of the types of the cells in the given column.
+func (s *Sheet) ColTypes(colx, startRowx int, endRowx *int) []int {
+	// Empty implementation for now
+	return []int{}
+}
+
+// CellXFIndex returns the XF index of the cell at the given row and column.
+func (s *Sheet) CellXFIndex(rowx, colx int) int {
+	// Empty implementation for now
+	return 0
+}
+
 // EmptyCell returns an empty cell.
 func EmptyCell() *Cell {
 	return &Cell{CType: XL_CELL_EMPTY}
