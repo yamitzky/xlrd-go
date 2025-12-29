@@ -97,14 +97,14 @@ const (
 	XL_BOOLERR              = 0x205
 	XL_BOOLERR_B2           = 0x5
 	XL_BOUNDSHEET           = 0x85
-	XL_BUILTINFMTCOUNT       = 0x56
+	XL_BUILTINFMTCOUNT      = 0x56
 	XL_CF                   = 0x01B1
 	XL_CODEPAGE             = 0x42
 	XL_COLINFO              = 0x7D
 	XL_COLUMNDEFAULT        = 0x20 // BIFF2 only
 	XL_COLWIDTH             = 0x24 // BIFF2 only
 	XL_CONDFMT              = 0x01B0
-	XL_CONTINUE             = 0x3c
+	XL_CONTINUE              = 0x3c
 	XL_COUNTRY              = 0x8C
 	XL_DATEMODE             = 0x22
 	XL_DEFAULTROWHEIGHT     = 0x0225
@@ -120,7 +120,7 @@ const (
 	XL_FILEPASS             = 0x2f
 	XL_FONT                 = 0x31
 	XL_FONT_B3B4            = 0x231
-	XL_FORMAT                = 0x41e
+	XL_FORMAT               = 0x41e
 	XL_FORMAT2               = 0x1E // BIFF2, BIFF3
 	XL_FORMULA               = 0x6
 	XL_FORMULA3              = 0x206
@@ -143,7 +143,7 @@ const (
 	XL_HEADER                = 0x14
 	XL_FOOTER                = 0x15
 	XL_HCENTER               = 0x83
-	XL_VCENTER               = 0x84
+	XL_VCENTER                = 0x84
 	XL_MERGEDCELLS           = 0xE5
 	XL_MSO_DRAWING           = 0x00EC
 	XL_MSO_DRAWING_GROUP     = 0x00EB
@@ -251,5 +251,66 @@ func (b *BaseObject) Dump(w io.Writer, header, footer string, indent int) {
 	}
 	if footer != "" {
 		fmt.Fprintf(w, "%s\n", footer)
+	}
+}
+
+// HexCharDump dumps a byte slice in hex and character format.
+func HexCharDump(strg []byte, ofs, dlen, base int, fout io.Writer, unnumbered bool) {
+	endpos := ofs + dlen
+	if endpos > len(strg) {
+		endpos = len(strg)
+	}
+	pos := ofs
+	numbered := !unnumbered
+	numPrefix := ""
+	
+	for pos < endpos {
+		endsub := pos + 16
+		if endsub > endpos {
+			endsub = endpos
+		}
+		substrg := strg[pos:endsub]
+		lensub := len(substrg)
+		
+		if lensub <= 0 {
+			fmt.Fprintf(fout, "??? hex_char_dump: ofs=%d dlen=%d base=%d -> endpos=%d pos=%d endsub=%d\n",
+				ofs, dlen, base, endpos, pos, endsub)
+			break
+		}
+		
+		// Build hex string
+		hexd := ""
+		for i := 0; i < lensub; i++ {
+			if i > 0 {
+				hexd += " "
+			}
+			hexd += fmt.Sprintf("%02x", substrg[i])
+		}
+		// Pad to 48 characters
+		for len(hexd) < 48 {
+			hexd += " "
+		}
+		
+		// Build character string
+		chard := ""
+		for i := 0; i < lensub; i++ {
+			c := substrg[i]
+			if c == 0 {
+				chard += "~"
+			} else if c < 32 || c > 126 {
+				chard += "?"
+			} else {
+				chard += string(c)
+			}
+		}
+		
+		if numbered {
+			numPrefix = fmt.Sprintf("%5d: ", base+pos-ofs)
+		} else {
+			numPrefix = ""
+		}
+		
+		fmt.Fprintf(fout, "%s     %-48s %s\n", numPrefix, hexd, chard)
+		pos = endsub
 	}
 }
