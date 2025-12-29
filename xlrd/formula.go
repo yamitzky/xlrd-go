@@ -384,7 +384,7 @@ var tokenNotAllowed = map[int]bool{
 	0x1B: true, 0x1C: true, 0x1D: true, 0x1E: true, 0x1F: true,
 }
 
-// Operator kind dictionary
+// OkindDict is the operator kind lookup table.
 var OkindDict = map[int]int{
 	0x01: 1, 0x02: 1, 0x03: 1, 0x04: 1, 0x05: 1, 0x06: 1, 0x07: 1, 0x08: 1,
 	0x09: 1, 0x0A: 1, 0x0B: 1, 0x0C: 1, 0x0D: 1, 0x0E: 1, 0x0F: 1, 0x10: 1,
@@ -930,7 +930,7 @@ func NewRef3D(coords_relflags ...int) *Ref3D {
 	return r
 }
 
-// dump_formula dumps formula data for debugging
+// DumpFormula dumps formula data for debugging.
 func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah int, isname int) {
 	if blah != 0 {
 		fmt.Fprintf(bk.logfile, "dump_formula %d %d %d\n", fmlalen, bv, len(data))
@@ -1375,7 +1375,7 @@ func getExternsheetLocalRange(bk *Book, refx, blah int) (int, int) {
 	return xlrdSheetx1, xlrdSheetx2
 }
 
-// evaluateNameFormula evaluates a named formula
+// EvaluateNameFormula evaluates a named formula.
 func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 	if level > StackAlarmLevel {
 		blah = 1
@@ -2209,7 +2209,7 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 	nobj.Evaluated = true
 }
 
-// decompileFormula decompiles a formula
+// DecompileFormula decompiles a formula.
 func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, bcolx interface{}, blah int, level int, r1c1 int) string {
 	if level > StackAlarmLevel {
 		blah = 1

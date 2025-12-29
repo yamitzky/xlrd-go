@@ -207,6 +207,7 @@ var boflen = map[int]int{
 
 var bofcodes = []int{0x0809, 0x0409, 0x0209, 0x0009}
 
+// XL_FORMULA_OPCODES lists BIFF formula record opcodes.
 var XL_FORMULA_OPCODES = []int{0x0006, 0x0406, 0x0206}
 
 var cellOpcodeSet = map[int]bool{
