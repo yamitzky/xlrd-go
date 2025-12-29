@@ -18,6 +18,21 @@ jobs:
           cache: true
       - name: Run tests with coverage
         run: go test -coverprofile=coverage.out ./...
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build xls2csv
+        run: go build -o /tmp/xls2csv ./cmd/xls2csv
+      - name: Integration test (xls2csv vs xlrd)
+        run: |
+          PYTHONPATH=. python3 scripts/compare_xls2csv.py \
+            --xls2csv /tmp/xls2csv \
+            --xls-dir testdata/samples \
+            --xls-dir tests/samples \
+            --dateformat "%Y-%m-%d %H:%M:%S" \
+            --floatformat "%.15g" \
+            --ignore-workbook-corruption
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
