@@ -10,12 +10,12 @@ import (
 
 // FileFormatDescriptions provides descriptions of the file types that can be inspected.
 var FileFormatDescriptions = map[string]string{
-	"xls":   "Excel xls",
-	"xlsb":  "Excel 2007 xlsb file",
-	"xlsx":  "Excel xlsx file",
-	"ods":   "Openoffice.org ODS file",
-	"zip":   "Unknown ZIP file",
-	"":      "Unknown file type",
+	"xls":  "Excel xls",
+	"xlsb": "Excel 2007 xlsb file",
+	"xlsx": "Excel xlsx file",
+	"ods":  "Openoffice.org ODS file",
+	"zip":  "Unknown ZIP file",
+	"":     "Unknown file type",
 }
 
 // XLS_SIGNATURE is the magic cookie that should appear in the first 8 bytes of an XLS file.

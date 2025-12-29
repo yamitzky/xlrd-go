@@ -13,7 +13,7 @@ func UnpackString(data []byte, pos int, encoding string, lenlen int) (string, er
 	if pos+lenlen > len(data) {
 		return "", fmt.Errorf("insufficient data for string length")
 	}
-	
+
 	var nchars int
 	if lenlen == 1 {
 		nchars = int(data[pos])
@@ -21,13 +21,13 @@ func UnpackString(data []byte, pos int, encoding string, lenlen int) (string, er
 		nchars = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 	}
 	pos += lenlen
-	
+
 	if pos+nchars > len(data) {
 		return "", fmt.Errorf("insufficient data for string")
 	}
-	
+
 	strBytes := data[pos : pos+nchars]
-	
+
 	// Convert based on encoding
 	if encoding == "utf_16_le" {
 		if len(strBytes)%2 != 0 {
@@ -39,7 +39,7 @@ func UnpackString(data []byte, pos int, encoding string, lenlen int) (string, er
 		}
 		return string(utf16.Decode(words)), nil
 	}
-	
+
 	// For other encodings, treat as Latin-1 for now
 	return string(strBytes), nil
 }
@@ -60,14 +60,14 @@ func UnpackStringUpdatePos(data []byte, pos int, encoding string, lenlen int, kn
 		}
 		pos += lenlen
 	}
-	
+
 	if pos+nchars > len(data) {
 		return "", pos, fmt.Errorf("insufficient data for string")
 	}
-	
+
 	strBytes := data[pos : pos+nchars]
 	newPos := pos + nchars
-	
+
 	// Convert based on encoding
 	if encoding == "utf_16_le" {
 		if len(strBytes)%2 != 0 {
@@ -79,7 +79,7 @@ func UnpackStringUpdatePos(data []byte, pos int, encoding string, lenlen int, kn
 		}
 		return string(utf16.Decode(words)), newPos, nil
 	}
-	
+
 	// For other encodings, treat as Latin-1 for now
 	return string(strBytes), newPos, nil
 }
@@ -89,7 +89,7 @@ func UnpackUnicode(data []byte, pos int, lenlen int) (string, error) {
 	if pos+lenlen > len(data) {
 		return "", fmt.Errorf("insufficient data for unicode length")
 	}
-	
+
 	var nchars int
 	if lenlen == 1 {
 		nchars = int(data[pos])
@@ -97,18 +97,18 @@ func UnpackUnicode(data []byte, pos int, lenlen int) (string, error) {
 		nchars = int(binary.LittleEndian.Uint16(data[pos : pos+2]))
 	}
 	pos += lenlen
-	
+
 	if nchars == 0 {
 		return "", nil
 	}
-	
+
 	if pos >= len(data) {
 		return "", fmt.Errorf("insufficient data for unicode options")
 	}
-	
+
 	options := data[pos]
 	pos++
-	
+
 	// Handle richtext and phonetic flags
 	if options&0x08 != 0 {
 		// richtext
@@ -124,7 +124,7 @@ func UnpackUnicode(data []byte, pos int, lenlen int) (string, error) {
 		}
 		pos += 4
 	}
-	
+
 	if options&0x01 != 0 {
 		// Uncompressed UTF-16-LE
 		if pos+2*nchars > len(data) {
@@ -166,24 +166,24 @@ func UnpackUnicodeUpdatePos(data []byte, pos int, lenlen int, knownLen *int) (st
 		}
 		pos += lenlen
 	}
-	
+
 	if nchars == 0 {
 		if pos >= len(data) {
 			return "", pos, nil
 		}
 		return "", pos, nil
 	}
-	
+
 	if pos >= len(data) {
 		return "", pos, fmt.Errorf("insufficient data for unicode options")
 	}
-	
+
 	options := data[pos]
 	pos++
-	
+
 	phonetic := (options & 0x04) != 0
 	richtext := (options & 0x08) != 0
-	
+
 	if richtext {
 		if pos+2 > len(data) {
 			return "", pos, fmt.Errorf("insufficient data for richtext")
@@ -196,7 +196,7 @@ func UnpackUnicodeUpdatePos(data []byte, pos int, lenlen int, knownLen *int) (st
 		}
 		pos += 4
 	}
-	
+
 	var str string
 	if options&0x01 != 0 {
 		// Uncompressed UTF-16-LE
@@ -218,7 +218,7 @@ func UnpackUnicodeUpdatePos(data []byte, pos int, lenlen int, knownLen *int) (st
 		str = string(data[pos : pos+nchars])
 		pos += nchars
 	}
-	
+
 	if richtext {
 		// Skip richtext data (would need to read rt count)
 		// For now, skip
@@ -227,6 +227,6 @@ func UnpackUnicodeUpdatePos(data []byte, pos int, lenlen int, knownLen *int) (st
 		// Skip phonetic data (would need to read sz)
 		// For now, skip
 	}
-	
+
 	return str, pos, nil
 }

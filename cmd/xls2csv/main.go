@@ -45,21 +45,21 @@ func (s *stringList) Set(value string) error {
 }
 
 type options struct {
-	allSheets           bool
-	sheetID             int
-	sheetName           string
-	delimiter           rune
-	lineTerminator      string
-	dateFormat          string
-	floatFormat         string
-	outputEncoding      string
-	ignoreEmpty         bool
-	escape              bool
-	sheetDelimiter      string
-	quoting             quotingMode
-	includeSheetPattern []*regexp.Regexp
-	excludeSheetPattern []*regexp.Regexp
-	mergeCells          bool
+	allSheets                bool
+	sheetID                  int
+	sheetName                string
+	delimiter                rune
+	lineTerminator           string
+	dateFormat               string
+	floatFormat              string
+	outputEncoding           string
+	ignoreEmpty              bool
+	escape                   bool
+	sheetDelimiter           string
+	quoting                  quotingMode
+	includeSheetPattern      []*regexp.Regexp
+	excludeSheetPattern      []*regexp.Regexp
+	mergeCells               bool
 	ignoreWorkbookCorruption bool
 }
 
@@ -216,21 +216,21 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	opts := options{
-		allSheets:           *allSheets || *sheetID == 0,
-		sheetID:             *sheetID,
-		sheetName:           *sheetName,
-		delimiter:           delimiter,
-		lineTerminator:      lineTerminator,
-		dateFormat:          *dateFormat,
-		floatFormat:         *floatFormat,
-		outputEncoding:      *outputEncoding,
-		ignoreEmpty:         *ignoreEmpty,
-		escape:              *escape,
-		sheetDelimiter:      sheetDelimiterValue,
-		quoting:             quoting,
-		includeSheetPattern: includeRegex,
-		excludeSheetPattern: excludeRegex,
-		mergeCells:          *mergeCells,
+		allSheets:                *allSheets || *sheetID == 0,
+		sheetID:                  *sheetID,
+		sheetName:                *sheetName,
+		delimiter:                delimiter,
+		lineTerminator:           lineTerminator,
+		dateFormat:               *dateFormat,
+		floatFormat:              *floatFormat,
+		outputEncoding:           *outputEncoding,
+		ignoreEmpty:              *ignoreEmpty,
+		escape:                   *escape,
+		sheetDelimiter:           sheetDelimiterValue,
+		quoting:                  quoting,
+		includeSheetPattern:      includeRegex,
+		excludeSheetPattern:      excludeRegex,
+		mergeCells:               *mergeCells,
 		ignoreWorkbookCorruption: *ignoreWorkbookCorruption,
 	}
 
@@ -479,8 +479,8 @@ func convertDir(inputDir, outputDir string, opts options, stdout io.Writer) erro
 
 func convertFile(inputPath string, content []byte, outputPath string, opts options, stdout io.Writer) error {
 	openOpts := &xlrd.OpenWorkbookOptions{
-		FormattingInfo: true,
-		FileContents:   content,
+		FormattingInfo:           true,
+		FileContents:             content,
 		IgnoreWorkbookCorruption: opts.ignoreWorkbookCorruption,
 	}
 	book, err := xlrd.OpenWorkbook(inputPath, openOpts)

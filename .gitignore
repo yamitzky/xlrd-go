@@ -1,3 +1,5 @@
+docs/public
+docs/.hugo_build.lock
 .bin/
 /build
 /dist

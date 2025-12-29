@@ -16,9 +16,9 @@ const (
 )
 
 var (
-	epoch1904        = time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
-	epoch1900        = time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
-	epoch1900Minus1  = time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
+	epoch1904       = time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
+	epoch1900       = time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
+	epoch1900Minus1 = time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC)
 )
 
 var daysInMonth = [13]int{0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
@@ -97,11 +97,11 @@ func XldateAsTuple(xldate float64, datemode int) (int, int, int, int, int, int, 
 	if seconds < 0 || seconds > 86400 {
 		return 0, 0, 0, 0, 0, 0, &XLDateError{Message: fmt.Sprintf("Invalid seconds: %d", seconds)}
 	}
-	
+
 	hour := 0
 	minute := 0
 	second := 0
-	
+
 	if seconds == 86400 {
 		hour = 0
 		minute = 0
@@ -113,7 +113,7 @@ func XldateAsTuple(xldate float64, datemode int) (int, int, int, int, int, int, 
 		hour = minutes / 60
 		minute = minutes % 60
 	}
-	
+
 	xldaysTooLarge := xldaysTooLarge1900
 	if datemode == 1 {
 		xldaysTooLarge = xldaysTooLarge1904
@@ -121,18 +121,18 @@ func XldateAsTuple(xldate float64, datemode int) (int, int, int, int, int, int, 
 	if xldays >= xldaysTooLarge {
 		return 0, 0, 0, 0, 0, 0, &XLDateTooLarge{XLDateError{Message: fmt.Sprintf("xldate too large: %f", xldate)}}
 	}
-	
+
 	if xldays == 0 {
 		return 0, 0, 0, hour, minute, second, nil
 	}
-	
+
 	if xldays < 61 && datemode == 0 {
 		return 0, 0, 0, 0, 0, 0, &XLDateAmbiguous{XLDateError{Message: fmt.Sprintf("1900 leap-year problem: %f", xldate)}}
 	}
-	
+
 	jdn := xldays + jdnDelta[datemode]
 	yreg := ((((jdn*4+274277)/146097)*3/4)+jdn+1363)*4 + 3
-	mp := ((yreg % 1461) / 4) * 535 + 333
+	mp := ((yreg%1461)/4)*535 + 333
 	d := ((mp % 16384) / 535) + 1
 	mp >>= 14
 	if mp >= 10 {
@@ -160,15 +160,15 @@ func XldateAsDatetime(xldate float64, datemode int) (time.Time, error) {
 			epoch = epoch1900Minus1
 		}
 	}
-	
+
 	days := int(xldate)
 	fraction := xldate - float64(days)
-	
+
 	// Get the integer and decimal seconds in Excel's millisecond resolution.
 	seconds := int(math.Round(fraction * 86400000.0))
 	secs := seconds / 1000
 	milliseconds := seconds % 1000
-	
+
 	return epoch.AddDate(0, 0, days).Add(time.Duration(secs)*time.Second + time.Duration(milliseconds)*time.Millisecond), nil
 }
 
@@ -177,11 +177,11 @@ func XldateFromDateTuple(year, month, day int, datemode int) (float64, error) {
 	if datemode != 0 && datemode != 1 {
 		return 0.0, &XLDateBadDatemode{XLDateError{Message: fmt.Sprintf("Invalid datemode: %d", datemode)}}
 	}
-	
+
 	if year == 0 && month == 0 && day == 0 {
 		return 0.00, nil
 	}
-	
+
 	if year < 1900 || year > 9999 {
 		return 0.0, &XLDateBadTuple{XLDateError{Message: fmt.Sprintf("Invalid year: (%d, %d, %d)", year, month, day)}}
 	}
@@ -195,7 +195,7 @@ func XldateFromDateTuple(year, month, day int, datemode int) (float64, error) {
 	if day < 1 || day > maxDay {
 		return 0.0, &XLDateBadTuple{XLDateError{Message: fmt.Sprintf("Invalid day: (%d, %d, %d)", year, month, day)}}
 	}
-	
+
 	Yp := year + 4716
 	M := month
 	var Mp int
@@ -205,7 +205,7 @@ func XldateFromDateTuple(year, month, day int, datemode int) (float64, error) {
 	} else {
 		Mp = M - 3
 	}
-	jdn := (1461*Yp/4) + ((979*Mp+16)/32) + day - 1364 - (((Yp+184)/100)*3/4)
+	jdn := (1461 * Yp / 4) + ((979*Mp + 16) / 32) + day - 1364 - (((Yp + 184) / 100) * 3 / 4)
 	xldays := jdn - jdnDelta[datemode]
 	if xldays <= 0 {
 		return 0.0, &XLDateBadTuple{XLDateError{Message: fmt.Sprintf("Invalid (year, month, day): (%d, %d, %d)", year, month, day)}}
@@ -221,7 +221,7 @@ func XldateFromTimeTuple(hour, minute, second int) (float64, error) {
 	if hour < 0 || hour >= 24 || minute < 0 || minute >= 60 || second < 0 || second >= 60 {
 		return 0.0, &XLDateBadTuple{XLDateError{Message: fmt.Sprintf("Invalid (hour, minute, second): (%d, %d, %d)", hour, minute, second)}}
 	}
-	return ((float64(second)/60.0 + float64(minute)) / 60.0 + float64(hour)) / 24.0, nil
+	return ((float64(second)/60.0+float64(minute))/60.0 + float64(hour)) / 24.0, nil
 }
 
 // XldateFromDatetimeTuple converts a datetime tuple to an Excel date number.

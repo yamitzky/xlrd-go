@@ -22,6 +22,7 @@ xls2csv [-h] [-v] [-a] [-c OUTPUTENCODING] [-s SHEETID]
         [--hyperlinks]
         [-I INCLUDE_SHEET_PATTERN [INCLUDE_SHEET_PATTERN ...]]
         [-E EXCLUDE_SHEET_PATTERN [EXCLUDE_SHEET_PATTERN ...]] [-m]
+        [--ignore-workbook-corruption]
         xlsfile [outfile]
 ```
 
