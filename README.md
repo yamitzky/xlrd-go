@@ -1,6 +1,6 @@
 # xlrd-go
 
-xlrd-go is a pure Go port of the classic xlrd library for reading legacy `.xls`
+xlrd-go is a pure Go port of the Python's [xlrd](https://xlrd.readthedocs.io/en/latest/) library for reading legacy `.xls`
 files (BIFF2-8). It focuses on extracting cell values and formatting
 information from historical Excel spreadsheets.
 

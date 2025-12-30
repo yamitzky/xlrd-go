@@ -26,6 +26,7 @@ jobs:
         run: go build -o /tmp/xls2csv ./cmd/xls2csv
       - name: Integration test (xls2csv vs xlrd)
         run: |
+          pip3 install xlrd
           PYTHONPATH=. python3 scripts/compare_xls2csv.py \
             --xls2csv /tmp/xls2csv \
             --xls-dir testdata/samples \
