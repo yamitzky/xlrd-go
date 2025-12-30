@@ -375,11 +375,20 @@ var tIsectFuncs = []func(int, int) int{
 	func(a, b int) int { return min(a, b) },
 }
 
-// Token not allowed
-var tokenNotAllowed = map[int]bool{
-	0x01: true, 0x02: true, 0x03: true, 0x10: true, 0x11: true, 0x12: true, 0x13: true,
-	0x14: true, 0x15: true, 0x16: true, 0x17: true, 0x18: true, 0x19: true, 0x1A: true,
-	0x1B: true, 0x1C: true, 0x1D: true, 0x1E: true, 0x1F: true,
+// Token not allowed masks by formula type.
+var tokenNotAllowed = map[int]int{
+	0x01: AllFmlaTypes - FmlaTypeCell,                                                  // tExp
+	0x02: AllFmlaTypes - FmlaTypeCell,                                                  // tTbl
+	0x0F: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tIsect
+	0x10: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tUnion/List
+	0x11: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tRange
+	0x20: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tArray
+	0x23: FmlaTypeShared,                                                               // tName
+	0x39: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tNameX
+	0x3A: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tRef3d
+	0x3B: FmlaTypeShared + FmlaTypeCondFmt + FmlaTypeDataVal,                           // tArea3d
+	0x2C: FmlaTypeCell + FmlaTypeArray,                                                 // tRefN
+	0x2D: FmlaTypeCell + FmlaTypeArray,                                                 // tAreaN
 }
 
 // OkindDict is the operator kind lookup table.
@@ -980,7 +989,7 @@ func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah 
 				stack = stack[:len(stack)-2]
 				// Concatenate lists
 				result := append(aop.([]interface{}), bop.([]interface{})...)
-				spush(stack, result)
+				stack = spush(stack, result)
 				if blah != 0 {
 					fmt.Fprintf(bk.logfile, "tlist post %v\n", stack)
 				}
@@ -1000,7 +1009,7 @@ func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah 
 					return
 				}
 				result := doBoxFuncs(tRangeFuncs, aop.([]interface{})[0].(*Ref3D), bop.([]interface{})[0].(*Ref3D))
-				spush(stack, result)
+				stack = spush(stack, result)
 				if blah != 0 {
 					fmt.Fprintf(bk.logfile, "tRange post %v\n", stack)
 				}
@@ -1020,13 +1029,13 @@ func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah 
 					return
 				}
 				result := doBoxFuncs(tIsectFuncs, aop.([]interface{})[0].(*Ref3D), bop.([]interface{})[0].(*Ref3D))
-				spush(stack, result)
+				stack = spush(stack, result)
 				if blah != 0 {
 					fmt.Fprintf(bk.logfile, "tIsect post %v\n", stack)
 				}
 			} else if opcode == 0x19 { // tAttr
-				subop := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
-				nc := int(data[pos+3])
+				subop := int(data[pos+1])
+				nc := int(binary.LittleEndian.Uint16(data[pos+2 : pos+4]))
 				subname := tAttrNames[subop]
 				if subname == "" {
 					subname = "??Unknown??"
@@ -1149,7 +1158,7 @@ func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah 
 				fmt.Fprintf(bk.logfile, "   %v\n", coords)
 			}
 			if optype == 1 {
-				spush(stack, coords)
+			stack = spush(stack, coords)
 			}
 		} else if opcode == 0x1B { // tArea3d
 			refx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
@@ -1171,7 +1180,7 @@ func DumpFormula(bk *Book, data []byte, fmlalen int, bv int, reldelta int, blah 
 				fmt.Fprintf(bk.logfile, "   %v\n", coords)
 			}
 			if optype == 1 {
-				spush(stack, coords)
+			stack = spush(stack, coords)
 			}
 		} else if opcode == 0x19 { // tNameX
 			refx := int(binary.LittleEndian.Uint16(data[pos+1 : pos+3]))
@@ -1390,7 +1399,7 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 	}
 
 	if level > StackPanicLevel {
-		panic(fmt.Sprintf("Excessive indirect references in NAME formula"))
+		panic(NewXLRDError("Excessive indirect references in NAME formula"))
 	}
 
 	sztab := szdict[bv]
@@ -1405,12 +1414,12 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 		stack = append(stack, item)
 	}
 
-	doBinop := func(opcd int, stk []interface{}) {
-		if len(stk) < 2 {
+	doBinop := func(opcd int) {
+		if len(stack) < 2 {
 			return
 		}
-		bop := stk[len(stk)-1].(*Operand)
-		aop := stk[len(stk)-2].(*Operand)
+		bop := stack[len(stack)-1].(*Operand)
+		aop := stack[len(stack)-2].(*Operand)
 		rule := binopRules[opcd]
 		argdict := rule.argdict
 		resultType := rule.resultType
@@ -1438,21 +1447,21 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 		resop := &Operand{kind: resultType, value: nil, _rank: rank, text: otext}
 
 		if bop.value == nil || aop.value == nil {
-			stk = stk[:len(stk)-2]
-			stk = append(stk, resop)
+			stack = stack[:len(stack)-2]
+			stack = append(stack, resop)
 			return
 		}
 
 		var bconv, aconv func(interface{}) interface{}
 		var ok bool
 		if bconv, ok = argdict[bop.kind].(func(interface{}) interface{}); !ok {
-			stk = stk[:len(stk)-2]
-			stk = append(stk, resop)
+			stack = stack[:len(stack)-2]
+			stack = append(stack, resop)
 			return
 		}
 		if aconv, ok = argdict[aop.kind].(func(interface{}) interface{}); !ok {
-			stk = stk[:len(stk)-2]
-			stk = append(stk, resop)
+			stack = stack[:len(stack)-2]
+			stack = append(stack, resop)
 			return
 		}
 
@@ -1467,15 +1476,15 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 			}
 		}
 		resop.value = result
-		stk = stk[:len(stk)-2]
-		stk = append(stk, resop)
+		stack = stack[:len(stack)-2]
+		stack = append(stack, resop)
 	}
 
-	doUnaryop := func(opcode int, resultType int, stk []interface{}) {
-		if len(stk) < 1 {
+	doUnaryop := func(opcode int, resultType int) {
+		if len(stack) < 1 {
 			return
 		}
-		aop := stk[len(stk)-1].(*Operand)
+		aop := stack[len(stack)-1].(*Operand)
 		rule := unopRules[opcode]
 		fn := rule.op.(func(interface{}) interface{})
 		rank := rule.priority
@@ -1497,13 +1506,13 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 			val = fn(val)
 		}
 		res := &Operand{kind: resultType, value: val, _rank: rank, text: otext}
-		stk = stk[:len(stk)-1]
-		stk = append(stk, res)
+		stack = stack[:len(stack)-1]
+		stack = append(stack, res)
 	}
 
 	notInNameFormula := func(opArg int, onameArg string) {
 		msg := fmt.Sprintf("ERROR *** Token 0x%02x (%s) found in NAME formula", opArg, onameArg)
-		panic(msg)
+		panic(&FormulaError{message: msg})
 	}
 
 	if fmlalen == 0 {
@@ -1529,14 +1538,14 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 
 		if sz == -2 {
 			msg := fmt.Sprintf(`ERROR *** Unexpected token 0x%02x ("%s"); biff_version=%d`, op, oname, bv)
-			panic(msg)
+			panic(&FormulaError{message: msg})
 		}
 
 		if optype == 0 {
 			if 0x00 <= opcode && opcode <= 0x02 { // unk_opnd, tExp, tTbl
 				notInNameFormula(op, oname)
 			} else if 0x03 <= opcode && opcode <= 0x0E { // Add, Sub, Mul, Div, Power, tConcat, tLT, ..., tNE
-				doBinop(opcode, stack)
+				doBinop(opcode)
 			} else if opcode == 0x0F { // tIsect
 				if blah != 0 {
 					fmt.Fprintf(bk.logfile, "tIsect pre %v\n", stack)
@@ -1710,7 +1719,7 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 					fmt.Fprintf(bk.logfile, "tRange post %v\n", stack)
 				}
 			} else if 0x12 <= opcode && opcode <= 0x14 { // tUplus, tUminus, tPercent
-				doUnaryop(opcode, oNUM, stack)
+				doUnaryop(opcode, oNUM)
 			} else if opcode == 0x15 { // tParen
 				// source cosmetics
 			} else if opcode == 0x16 { // tMissArg
@@ -1731,7 +1740,7 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 				spush(&Operand{kind: oSTRG, value: strg, _rank: LeafRank, text: text})
 			} else if opcode == 0x18 { // tExtended
 				// new with BIFF 8
-				panic("tExtended token not implemented")
+				panic(&FormulaError{message: "tExtended token not implemented"})
 			} else if opcode == 0x19 { // tAttr
 				result, err := unpack("<BH", data[pos+1:pos+4])
 				if err != nil {
@@ -1761,7 +1770,7 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 				}
 			} else if 0x1A <= opcode && opcode <= 0x1B { // tSheet, tEndSheet
 				assert(bv < 50)
-				panic("tSheet & tEndsheet tokens not implemented")
+				panic(&FormulaError{message: "tSheet & tEndsheet tokens not implemented"})
 			} else if 0x1C <= opcode && opcode <= 0x1F { // tErr, tBool, tInt, tNum
 				inx := opcode - 0x1C
 				nb := []int{1, 1, 2, 8}[inx]
@@ -1784,10 +1793,10 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 				}
 				spush(&Operand{kind: kind, value: value, _rank: LeafRank, text: text})
 			} else {
-				panic(fmt.Sprintf("Unhandled opcode: 0x%02x", opcode))
+				panic(&FormulaError{message: fmt.Sprintf("Unhandled opcode: 0x%02x", opcode)})
 			}
 			if sz <= 0 {
-				panic(fmt.Sprintf("Size not set for opcode 0x%02x", opcode))
+				panic(&FormulaError{message: fmt.Sprintf("Size not set for opcode 0x%02x", opcode)})
 			}
 			pos += sz
 			continue
@@ -2179,7 +2188,7 @@ func EvaluateNameFormula(bk *Book, nobj *Name, namex int, blah int, level int) {
 			anyErr = 1
 		}
 		if sz <= 0 {
-			panic("Fatal: token size is not positive")
+			panic(&FormulaError{message: "Fatal: token size is not positive"})
 		}
 		pos += sz
 	}
@@ -2242,7 +2251,7 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 		hexCharDump(data, 0, fmlalen, bk.logfile.(*os.File))
 	}
 	if level > StackPanicLevel {
-		panic(fmt.Sprintf("Excessive indirect references in formula"))
+		panic(NewXLRDError("Excessive indirect references in formula"))
 	}
 	sztab := szdict[bv]
 	pos := 0
@@ -2255,12 +2264,12 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 		stack = append(stack, item)
 	}
 
-	doBinop := func(opcd int, stk []interface{}) {
-		if len(stk) < 2 {
+	doBinop := func(opcd int) {
+		if len(stack) < 2 {
 			return
 		}
-		bop := stk[len(stk)-1].(*Operand)
-		aop := stk[len(stk)-2].(*Operand)
+		bop := stack[len(stack)-1].(*Operand)
+		aop := stack[len(stack)-2].(*Operand)
 		rule := binopRules[opcd]
 		_ = rule.argdict
 		resultType := rule.resultType
@@ -2285,15 +2294,15 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 		}
 
 		resop := &Operand{kind: resultType, value: nil, _rank: rank, text: otext}
-		stk = stk[:len(stk)-2]
-		stk = append(stk, resop)
+		stack = stack[:len(stack)-2]
+		stack = append(stack, resop)
 	}
 
-	doUnaryop := func(opcode int, resultType int, stk []interface{}) {
-		if len(stk) < 1 {
+	doUnaryop := func(opcode int, resultType int) {
+		if len(stack) < 1 {
 			return
 		}
-		aop := stk[len(stk)-1].(*Operand)
+		aop := stack[len(stack)-1].(*Operand)
 		rule := unopRules[opcode]
 		rank := rule.priority
 		sym1 := rule.prefix
@@ -2310,8 +2319,8 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 		otext += sym2
 
 		res := &Operand{kind: resultType, value: nil, _rank: rank, text: otext}
-		stk = stk[:len(stk)-1]
-		stk = append(stk, res)
+		stack = stack[:len(stack)-1]
+		stack = append(stack, res)
 	}
 
 	unexpectedOpcode := func(opArg int, onameArg string) {
@@ -2344,11 +2353,10 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 
 		if sz == -2 {
 			msg := fmt.Sprintf(`ERROR *** Unexpected token 0x%02x ("%s"); biff_version=%d`, op, oname, bv)
-			panic(msg)
+			panic(&FormulaError{message: msg})
 		}
 
-		tokenMask := tokenNotAllowed[opx]
-		if tokenMask {
+		if tokenMask, ok := tokenNotAllowed[opx]; ok && (tokenMask&fmlatype) != 0 {
 			unexpectedOpcode(op, oname)
 		}
 
@@ -2371,7 +2379,7 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 					unexpectedOpcode(op, oname)
 				}
 			} else if 0x03 <= opcode && opcode <= 0x0E { // Add, Sub, Mul, Div, Power, tConcat, tLT, ..., tNE
-				doBinop(opcode, stack)
+				doBinop(opcode)
 			} else if opcode == 0x0F { // tIsect
 				if blah != 0 {
 					fmt.Fprintf(bk.logfile, "tIsect pre %v\n", stack)
@@ -2407,9 +2415,26 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 				} else if bop.kind == oUNK || aop.kind == oUNK {
 					// This can happen with undefined labels
 				} else if bop.kind == oREF && aop.kind == oREF {
-					// pass
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tIsectFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						res.value = []*Ref3D{NewRef3D(coords...)}
+					}
 				} else if bop.kind == oREL && aop.kind == oREL {
 					res.kind = oREL
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tIsectFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						relfa := aop.value.([]*Ref3D)[0].relflags
+						relfb := bop.value.([]*Ref3D)[0].relflags
+						if relfa != nil && relfb != nil && reflect.DeepEqual(relfa, relfb) {
+							relflags := make([]int, len(relfa))
+							copy(relflags, relfa)
+							res.value = []*Ref3D{NewRef3D(append(coords, relflags...)...)}
+						}
+					}
 				}
 				stack = stack[:len(stack)-2]
 				spush(res)
@@ -2452,6 +2477,13 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 					if aop.kind == oREL || bop.kind == oREL {
 						res.kind = oREL
 					}
+					if aop.value != nil && bop.value != nil {
+						aopVal := aop.value.([]*Ref3D)
+						bopVal := bop.value.([]*Ref3D)
+						assert(len(aopVal) >= 1)
+						assert(len(bopVal) == 1)
+						res.value = append(aopVal, bopVal...)
+					}
 				}
 				stack = stack[:len(stack)-2]
 				spush(res)
@@ -2490,7 +2522,26 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 				if bop.kind == oERR || aop.kind == oERR {
 					res.kind = oERR
 				} else if bop.kind == oREF && aop.kind == oREF {
-					// pass
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tRangeFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						res.value = []*Ref3D{NewRef3D(coords...)}
+					}
+				} else if bop.kind == oREL && aop.kind == oREL {
+					res.kind = oREL
+					if aop.value != nil && bop.value != nil {
+						assert(len(aop.value.([]*Ref3D)) == 1)
+						assert(len(bop.value.([]*Ref3D)) == 1)
+						coords := doBoxFuncs(tRangeFuncs, aop.value.([]*Ref3D)[0], bop.value.([]*Ref3D)[0])
+						relfa := aop.value.([]*Ref3D)[0].relflags
+						relfb := bop.value.([]*Ref3D)[0].relflags
+						if relfa != nil && relfb != nil && reflect.DeepEqual(relfa, relfb) {
+							relflags := make([]int, len(relfa))
+							copy(relflags, relfa)
+							res.value = []*Ref3D{NewRef3D(append(coords, relflags...)...)}
+						}
+					}
 				}
 				stack = stack[:len(stack)-2]
 				spush(res)
@@ -2498,7 +2549,7 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 					fmt.Fprintf(bk.logfile, "tRange post %v\n", stack)
 				}
 			} else if 0x12 <= opcode && opcode <= 0x14 { // tUplus, tUminus, tPercent
-				doUnaryop(opcode, oNUM, stack)
+				doUnaryop(opcode, oNUM)
 			} else if opcode == 0x15 { // tParen
 				// source cosmetics
 			} else if opcode == 0x16 { // tMissArg
@@ -2517,10 +2568,10 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 				}
 				text := "\"" + strings.ReplaceAll(strg, "\"", "\"\"") + "\""
 				spush(&Operand{kind: oSTRG, value: nil, _rank: LeafRank, text: text})
-			} else if opcode == 0x18 { // tExtended
-				// new with BIFF 8
-				assert(bv >= 80)
-				panic("tExtended token not implemented")
+				} else if opcode == 0x18 { // tExtended
+					// new with BIFF 8
+					assert(bv >= 80)
+					panic(&FormulaError{message: "tExtended token not implemented"})
 			} else if opcode == 0x19 { // tAttr
 				result, err := unpack("<BH", data[pos+1:pos+4])
 				if err != nil {
@@ -2548,9 +2599,9 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 				if blah != 0 {
 					fmt.Fprintf(bk.logfile, "   subop=%02xh subname=t%s sz=%d nc=%02xh\n", subop, subname, sz, nc)
 				}
-			} else if 0x1A <= opcode && opcode <= 0x1B { // tSheet, tEndSheet
-				assert(bv < 50)
-				panic("tSheet & tEndsheet tokens not implemented")
+				} else if 0x1A <= opcode && opcode <= 0x1B { // tSheet, tEndSheet
+					assert(bv < 50)
+					panic(&FormulaError{message: "tSheet & tEndsheet tokens not implemented"})
 			} else if 0x1C <= opcode && opcode <= 0x1F { // tErr, tBool, tInt, tNum
 				inx := opcode - 0x1C
 				nb := []int{1, 1, 2, 8}[inx]
@@ -2572,12 +2623,12 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 					text = "\"" + errorTextFromCode[int(value.(uint8))] + "\""
 				}
 				spush(&Operand{kind: kind, value: value, _rank: LeafRank, text: text})
-			} else {
-				panic(fmt.Sprintf("Unhandled opcode: 0x%02x", opcode))
-			}
-			if sz <= 0 {
-				panic(fmt.Sprintf("Size not set for opcode 0x%02x", opcode))
-			}
+				} else {
+					panic(&FormulaError{message: fmt.Sprintf("Unhandled opcode: 0x%02x", opcode)})
+				}
+				if sz <= 0 {
+					panic(&FormulaError{message: fmt.Sprintf("Size not set for opcode 0x%02x", opcode)})
+				}
 			pos += sz
 			continue
 		}
@@ -3024,7 +3075,7 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 			anyErr = 1
 		}
 		if sz <= 0 {
-			panic("Fatal: token size is not positive")
+			panic(&FormulaError{message: "Fatal: token size is not positive"})
 		}
 		pos += sz
 	}
