@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"golang.org/x/text/encoding/charmap"
 )
@@ -1608,10 +1609,10 @@ func (s *Sheet) handleHlink(data []byte) {
 	options := int(binary.LittleEndian.Uint32(data[28:32]))
 
 	if string(guid0) != string([]byte{0xD0, 0xC9, 0xEA, 0x79, 0xF9, 0xBA, 0xCE, 0x11, 0x8C, 0x82, 0x00, 0xAA, 0x00, 0x4B, 0xA9, 0x0B}) {
-		return
+		panic(NewXLRDError("invalid hyperlink GUID"))
 	}
 	if string(dummy) != string([]byte{0x02, 0x00, 0x00, 0x00}) {
-		return
+		panic(NewXLRDError("invalid hyperlink dummy header"))
 	}
 	offset := 32
 
@@ -1644,12 +1645,13 @@ func (s *Sheet) handleHlink(data []byte) {
 			}
 			raw := data[offset : offset+nbytes]
 			ustr := decodeUTF16LE(raw)
-			if idx := strings.IndexByte(ustr, 0); idx >= 0 {
+			endposRunes := len([]rune(ustr))
+			if idx := strings.IndexRune(ustr, 0); idx >= 0 {
+				endposRunes = utf8.RuneCountInString(ustr[:idx])
 				ustr = ustr[:idx]
 			}
 			h.URLOrPath = ustr
-			endpos := len(ustr)
-			trueNBytes := 2 * (endpos + 1)
+			trueNBytes := 2 * (endposRunes + 1)
 			offset += trueNBytes
 			extra := nbytes - trueNBytes
 			if extra > 0 && offset+extra <= len(data) {
@@ -1717,6 +1719,9 @@ func (s *Sheet) handleHlink(data []byte) {
 	if extra > 0 && s.Book != nil && s.Book.verbosity > 0 {
 		fmt.Fprintf(s.Book.logfile, "*** WARNING: hyperlink at R%dC%d has %d extra data bytes\n",
 			h.FRowx+1, h.FColx+1, extra)
+	}
+	if extra < 0 {
+		panic(NewXLRDError("hyperlink record size mismatch"))
 	}
 
 	s.HyperlinkList = append(s.HyperlinkList, h)
@@ -1940,9 +1945,21 @@ func (s *Sheet) handleFormula(bk *Book, data []byte, dataLen int) {
 	// Parse formula record header
 	rowx := int(binary.LittleEndian.Uint16(data[0:2]))
 	colx := int(binary.LittleEndian.Uint16(data[2:4]))
-	xfIndex := int(binary.LittleEndian.Uint16(data[4:6]))
-	resultStr := data[6:14]                     // 8 bytes of cached result
-	_ = binary.LittleEndian.Uint16(data[14:16]) // flags (unused for now)
+	xfIndex := 0
+	var resultStr []byte
+	if bk.BiffVersion >= 30 {
+		xfIndex = int(binary.LittleEndian.Uint16(data[4:6]))
+		resultStr = data[6:14]
+	} else {
+		cellAttr := data[4:7]
+		xf, err := s.fixedBIFF2XFIndex(cellAttr, rowx, colx, nil)
+		if err != nil {
+			return
+		}
+		xfIndex = xf
+		resultStr = data[7:15]
+	}
+	_ = resultStr
 
 	// Formula record parsed
 
