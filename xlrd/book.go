@@ -1614,6 +1614,9 @@ func (b *Book) handlePalette(data []byte) error {
 	if len(data) < 2 {
 		return nil
 	}
+	if b.ColourMap == nil {
+		b.ColourMap = make(map[int][3]int)
+	}
 
 	pos := 0
 	// Number of colors (2 bytes)

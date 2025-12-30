@@ -639,11 +639,17 @@ func writeSheets(w io.Writer, book *xlrd.Book, sheetIndexes []int, opts options)
 }
 
 func writeSheet(cw *csvWriter, book *xlrd.Book, sheet *xlrd.Sheet, opts options) error {
+	maxCols := sheetMaxCols(sheet, opts)
 	for rowx := 0; rowx < sheet.NRows; rowx++ {
-		fields := make([]field, sheet.NCols)
+		fields := make([]field, maxCols)
 		allEmpty := true
-		for colx := 0; colx < sheet.NCols; colx++ {
-			text, isNumeric := formatCell(book, sheet, rowx, colx, opts)
+		rowLen := sheet.RowLen(rowx)
+		for colx := 0; colx < maxCols; colx++ {
+			text := ""
+			isNumeric := false
+			if colx < rowLen {
+				text, isNumeric = formatCell(book, sheet, rowx, colx, opts)
+			}
 			if text != "" {
 				allEmpty = false
 			}
@@ -657,6 +663,32 @@ func writeSheet(cw *csvWriter, book *xlrd.Book, sheet *xlrd.Sheet, opts options)
 		}
 	}
 	return nil
+}
+
+func sheetMaxCols(sheet *xlrd.Sheet, opts options) int {
+	maxCols := 0
+	for rowx := 0; rowx < sheet.NRows; rowx++ {
+		rowLen := sheet.RowLen(rowx)
+		rowMax := 0
+		for colx := 0; colx < rowLen; colx++ {
+			ctype := xlrd.XL_CELL_EMPTY
+			if opts.mergeCells {
+				ctype = sheet.CellType(rowx, colx)
+			} else {
+				ctype = sheet.RawCellType(rowx, colx)
+			}
+			if ctype != xlrd.XL_CELL_EMPTY && ctype != xlrd.XL_CELL_BLANK {
+				rowMax = colx + 1
+			}
+		}
+		if rowMax > maxCols {
+			maxCols = rowMax
+		}
+	}
+	if maxCols == 0 {
+		maxCols = sheet.NCols
+	}
+	return maxCols
 }
 
 func formatCell(book *xlrd.Book, sheet *xlrd.Sheet, rowx, colx int, opts options) (string, bool) {

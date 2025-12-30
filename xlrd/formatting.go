@@ -471,6 +471,9 @@ func fillInStandardFormats(book *Book) {
 }
 
 func checkColourIndexesInObj(book *Book, obj interface{}, origIndex int) {
+	if book.ColourIndexesUsed == nil {
+		book.ColourIndexesUsed = make(map[int]bool)
+	}
 	v := reflect.ValueOf(obj)
 	if !v.IsValid() {
 		return
