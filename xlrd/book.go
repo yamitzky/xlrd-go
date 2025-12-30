@@ -113,6 +113,7 @@ type Book struct {
 	encodingOverride         string
 	ignoreWorkbookCorruption bool
 	sharedStrings            []string
+	richTextRunlistMap       map[int][][]int
 
 	// Name mappings
 	nameAndScopeMap map[string]map[int]*Name // maps (lower_case_name, scope) to Name object
@@ -1510,10 +1511,16 @@ func (b *Book) handleXF(data []byte) error {
 	}
 
 	cellType := XL_CELL_NUMBER
+	if b.FormatMap == nil {
+		b.FormatMap = make(map[int]*Format)
+	}
 	if fmtObj, ok := b.FormatMap[xf.FormatKey]; ok {
 		if ty, ok := cellTypeFromFormatType[fmtObj.Type]; ok {
 			cellType = ty
 		}
+	}
+	if b.xfIndexToXLTypeMap == nil {
+		b.xfIndexToXLTypeMap = make(map[int]int)
 	}
 	b.xfIndexToXLTypeMap[xf.XFIndex] = cellType
 
@@ -1606,6 +1613,9 @@ func (b *Book) handlePalette(data []byte) error {
 	}
 	if len(data) < 2 {
 		return nil
+	}
+	if b.ColourMap == nil {
+		b.ColourMap = make(map[int][3]int)
 	}
 
 	pos := 0
@@ -1841,8 +1851,9 @@ func (b *Book) handleSST(data []byte) error {
 		strlist = append(strlist, cont)
 	}
 
-	shared, _ := UnpackSSTTable(strlist, numStrings)
+	shared, richtextRuns := UnpackSSTTable(strlist, numStrings)
 	b.sharedStrings = shared
+	b.richTextRunlistMap = richtextRuns
 	return nil
 }
 
@@ -2045,13 +2056,19 @@ func (b *Book) getSheet(shNumber int, updatePos ...bool) (*Sheet, error) {
 
 	// Create sheet
 	sheet := &Sheet{
-		Book:           b,
-		Name:           b.sheetNames[shNumber],
-		ColInfoMap:     make(map[int]*ColInfo),
-		RowInfoMap:     make(map[int]*RowInfo),
-		ColLabelRanges: make([][4]int, 0),
-		RowLabelRanges: make([][4]int, 0),
-		MergedCells:    make([][4]int, 0),
+		Book:               b,
+		Name:               b.sheetNames[shNumber],
+		ColInfoMap:         make(map[int]*ColInfo),
+		RowInfoMap:         make(map[int]*RowInfo),
+		ColLabelRanges:     make([][4]int, 0),
+		RowLabelRanges:     make([][4]int, 0),
+		MergedCells:        make([][4]int, 0),
+		HyperlinkList:      make([]*Hyperlink, 0),
+		HyperlinkMap:       make(map[[2]int]*Hyperlink),
+		CellNoteMap:        make(map[[2]int]*Note),
+		RichTextRunlistMap: make(map[[2]int][][]int),
+		cellAttrToXF:       make(map[[3]byte]int),
+		ixfe:               -1,
 	}
 
 	// Read sheet data
