@@ -29,4 +29,5 @@ hugo -s docs
 
 ## Making a release
 
-Update the changelog and tag a release. Release automation will be added in CI.
+Update the changelog and tag a release. Pushing a `v*` tag triggers GoReleaser
+to publish the `xls2csv` binaries and release notes to GitHub Releases.
