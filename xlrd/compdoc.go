@@ -212,10 +212,16 @@ func (cd *CompDoc) locateStream(mem []byte, base int, sat []int, secSize int, st
 		}
 
 		// Check for corruption: if this sector has already been seen
-		if cd.seen[s] != 0 && !cd.IgnoreWorkbookCorruption {
-			return nil, 0, 0, &CompDocError{
-				Message: fmt.Sprintf("%s corruption: seen[%d] == %d", qname, s, cd.seen[s]),
+		if cd.seen[s] != 0 {
+			if !cd.IgnoreWorkbookCorruption {
+				return nil, 0, 0, &CompDocError{
+					Message: fmt.Sprintf("%s corruption: seen[%d] == %d", qname, s, cd.seen[s]),
+				}
 			}
+			if cd.DEBUG > 0 {
+				fmt.Fprintf(cd.Logfile, "_locate_stream(%s): seen\n", qname)
+			}
+			break
 		}
 		cd.seen[s] = seenID
 		totFound++
@@ -237,6 +243,11 @@ func (cd *CompDoc) locateStream(mem []byte, base int, sat []int, secSize int, st
 			slices = append(slices, struct{ start, end int }{startPos, endPos})
 		}
 
+		if s < 0 || s >= len(sat) {
+			return nil, 0, 0, &CompDocError{
+				Message: fmt.Sprintf("OLE2 stream %q: sector allocation table invalid entry (%d)", qname, s),
+			}
+		}
 		s = sat[s]
 	}
 
@@ -277,7 +288,11 @@ func (cd *CompDoc) getStream(mem []byte, base int, sat []int, secSize int, start
 	todo := size
 	for s >= 0 && todo > 0 {
 		if s >= len(sat) {
-			break
+			if cd.IgnoreWorkbookCorruption {
+				fmt.Fprintf(cd.Logfile, "WARNING *** OLE2 stream %q: sector allocation table invalid entry (%d)\n", name, s)
+				break
+			}
+			return nil
 		}
 
 		// Check for corruption: if this sector has already been seen
@@ -285,11 +300,9 @@ func (cd *CompDoc) getStream(mem []byte, base int, sat []int, secSize int, start
 		if seenID != 0 && s < len(cd.seen) && cd.seen[s] != 0 {
 			if !cd.IgnoreWorkbookCorruption {
 				fmt.Fprintf(cd.Logfile, "_get_stream(%s): seen corruption at sector %d (value %d)\n", name, s, cd.seen[s])
-				return nil // Would return CompDocError in full implementation
-			} else {
-				// Ignore corruption and continue
-				fmt.Fprintf(cd.Logfile, "_get_stream(%s): ignoring corruption at sector %d (value %d)\n", name, s, cd.seen[s])
+				return nil
 			}
+			fmt.Fprintf(cd.Logfile, "_get_stream(%s): ignoring corruption at sector %d (value %d)\n", name, s, cd.seen[s])
 		}
 		if seenID != 0 && s < len(cd.seen) {
 			cd.seen[s] = seenID
@@ -306,14 +319,14 @@ func (cd *CompDoc) getStream(mem []byte, base int, sat []int, secSize int, start
 		sectors = append(sectors, mem[startPos:startPos+grab])
 		todo -= grab
 		s = sat[s]
-		if s == EOCSID {
-			break
-		}
 	}
 
 	result := make([]byte, 0, size)
 	for _, sector := range sectors {
 		result = append(result, sector...)
+	}
+	if todo != 0 && cd.Logfile != nil {
+		fmt.Fprintf(cd.Logfile, "WARNING *** OLE2 stream %q: expected size %d, actual size %d\n", name, size, size-todo)
 	}
 	return result
 }
@@ -343,14 +356,29 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		IgnoreWorkbookCorruption: ignoreWorkbookCorruption,
 	}
 
+	warnf := func(format string, args ...interface{}) {
+		if cd.Logfile != nil {
+			fmt.Fprintf(cd.Logfile, format, args...)
+		}
+	}
+	fail := func(msg string) error {
+		if cd.IgnoreWorkbookCorruption {
+			warnf("WARNING *** %s\n", msg)
+			return nil
+		}
+		return &CompDocError{Message: msg}
+	}
+
 	// Parse header
 	ssz := int(binary.LittleEndian.Uint16(mem[30:32]))
 	sssz := int(binary.LittleEndian.Uint16(mem[32:34]))
 
 	if ssz > 20 {
+		warnf("WARNING: sector size (2**%d) is preposterous; assuming 512 and continuing ...\n", ssz)
 		ssz = 9 // Default to 512 bytes
 	}
 	if sssz > ssz {
+		warnf("WARNING: short stream sector size (2**%d) is preposterous; assuming 64 and continuing ...\n", sssz)
 		sssz = 6 // Default to 64 bytes
 	}
 
@@ -371,12 +399,22 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 	cd.memDataSecs = memDataSecs
 	cd.memDataLen = memDataLen
 	cd.seen = make([]int, memDataSecs)
+	if memDataLen%cd.secSize != 0 {
+		warnf("WARNING *** file size (%d) not 512 + multiple of sector size (%d)\n", len(mem), cd.secSize)
+	}
 
 	// Build MSAT (Master Sector Allocation Table)
 	MSAT := make([]int, 109)
 	for i := 0; i < 109; i++ {
 		MSAT[i] = int(int32(binary.LittleEndian.Uint32(mem[76+i*4 : 80+i*4])))
 	}
+	nent := cd.secSize / 4
+	satSectorsReqd := (memDataSecs + nent - 1) / nent
+	expectedMSATXSectors := 0
+	if satSectorsReqd > 109 {
+		expectedMSATXSectors = (satSectorsReqd - 109 + nent - 2) / (nent - 1)
+	}
+	actualMSATXSectors := 0
 
 	// Handle MSAT extensions if present
 	MSATXFirstSecSID := int(int32(binary.LittleEndian.Uint32(mem[68:72])))
@@ -392,16 +430,28 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		sid := MSATXFirstSecSID
 		for sid != EOCSID && sid != FREESID && sid != MSATSID {
 			if sid >= memDataSecs {
-				break // Invalid sector
+				if err := fail(fmt.Sprintf("MSAT extension: accessing sector %d but only %d in file", sid, memDataSecs)); err != nil {
+					return nil, err
+				}
+				break
 			}
 			if sid < 0 {
-				break // Invalid sector
+				if err := fail(fmt.Sprintf("MSAT extension: invalid sector id: %d", sid)); err != nil {
+					return nil, err
+				}
+				break
 			}
 			if cd.seen[sid] != 0 {
-				// Corruption detected in MSAT
+				if err := fail(fmt.Sprintf("MSAT corruption: seen[%d] == %d", sid, cd.seen[sid])); err != nil {
+					return nil, err
+				}
 				break
 			}
 			cd.seen[sid] = 1
+			actualMSATXSectors++
+			if cd.DEBUG > 0 && actualMSATXSectors > expectedMSATXSectors {
+				warnf("[1]===>>> %d %d %d %d %d\n", memDataSecs, nent, satSectorsReqd, expectedMSATXSectors, actualMSATXSectors)
+			}
 
 			offset := 512 + sid*cd.secSize
 			if offset+cd.secSize > len(mem) {
@@ -418,23 +468,41 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 			sid = extMSAT[len(extMSAT)-1]                    // Next sector in chain
 		}
 	}
+	if cd.DEBUG > 0 && actualMSATXSectors != expectedMSATXSectors {
+		warnf("[2]===>>> %d %d %d %d %d\n", memDataSecs, nent, satSectorsReqd, expectedMSATXSectors, actualMSATXSectors)
+	}
 
 	// Build SAT (Sector Allocation Table)
 	cd.SAT = make([]int, 0)
-	nent := cd.secSize / 4 // number of SID entries in a sector
+	actualSATSec := 0
+	dumpAgain := false
+	truncWarned := false
 
 	for _, msid := range MSAT {
 		if msid == FREESID || msid == EOCSID {
 			continue
 		}
 		if msid < 0 || msid >= memDataSecs {
+			if !truncWarned {
+				warnf("WARNING *** File is truncated, or OLE2 MSAT is corrupt!!\n")
+				warnf("INFO: Trying to access sector %d but only %d available\n", msid, memDataSecs)
+				truncWarned = true
+			}
+			dumpAgain = true
 			continue
 		}
 		if cd.seen[msid] != 0 {
-			// Corruption detected in SAT
+			if err := fail(fmt.Sprintf("MSAT extension corruption: seen[%d] == %d", msid, cd.seen[msid])); err != nil {
+				return nil, err
+			}
 			break
 		}
 		cd.seen[msid] = 2
+		actualSATSec++
+		if cd.DEBUG > 0 && actualSATSec > satSectorsReqd {
+			warnf("[3]===>>> %d %d %d %d %d %d %d\n",
+				memDataSecs, nent, satSectorsReqd, expectedMSATXSectors, actualMSATXSectors, actualSATSec, msid)
+		}
 		offset := 512 + msid*cd.secSize
 		if offset+cd.secSize > len(mem) {
 			continue
@@ -445,12 +513,25 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 		}
 		cd.SAT = append(cd.SAT, sector...)
 	}
+	if cd.DEBUG > 0 && dumpAgain {
+		for satx := memDataSecs; satx < len(cd.SAT); satx++ {
+			cd.SAT[satx] = EVILSID
+		}
+	}
 
 	// Build directory - need to calculate directory size first
 	// Directory is typically multiple sectors, but we'll read until we hit EOCSID
 	dirSize := 0
 	sid := dirFirstSecSID
+	seenDir := make(map[int]bool)
 	for sid >= 0 && sid < len(cd.SAT) {
+		if seenDir[sid] {
+			if err := fail(fmt.Sprintf("Directory chain corruption: seen[%d] twice", sid)); err != nil {
+				return nil, err
+			}
+			break
+		}
+		seenDir[sid] = true
 		dirSize += cd.secSize
 		nextSid := cd.SAT[sid]
 		if nextSid == EOCSID {
@@ -520,10 +601,22 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 
 		// Build SSAT (Short Sector Allocation Table)
 		cd.SSAT = make([]int, 0)
+		if SSATTotSecs > 0 && sscsDir.TotSize == 0 {
+			warnf("WARNING *** OLE2 inconsistency: SSCS size is 0 but SSAT size is non-zero\n")
+		}
 		if SSATTotSecs > 0 && len(cd.SSCS) > 0 {
 			sid := SSATFirstSecSID
 			nsecs := SSATTotSecs
 			for sid >= 0 && nsecs > 0 {
+				if sid < len(cd.seen) && cd.seen[sid] != 0 {
+					if err := fail(fmt.Sprintf("SSAT corruption: seen[%d] == %d", sid, cd.seen[sid])); err != nil {
+						return nil, err
+					}
+					break
+				}
+				if sid < len(cd.seen) {
+					cd.seen[sid] = 5
+				}
 				if sid >= len(cd.SAT) {
 					break
 				}
@@ -538,6 +631,11 @@ func NewCompDoc(mem []byte, logfile io.Writer, debug int, ignoreWorkbookCorrupti
 				cd.SSAT = append(cd.SSAT, sector...)
 				sid = cd.SAT[sid]
 				nsecs--
+			}
+			if nsecs != 0 || sid != EOCSID {
+				if err := fail("SSAT chain ended prematurely"); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

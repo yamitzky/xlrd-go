@@ -95,9 +95,7 @@ func copyOperand(op *Operand) *Operand {
 
 // evaluateNameFormula evaluates a named formula recursively
 func evaluateNameFormula(bk *Book, tgtobj *Name, tgtnamex int, blah int, level int) {
-	// TODO: Implement name formula evaluation
-	// For now, just mark as evaluated to avoid infinite recursion
-	tgtobj.Evaluated = true
+	EvaluateNameFormula(bk, tgtobj, tgtnamex, blah, level)
 }
 
 // errorTextFromCode returns error text from error code
@@ -2214,6 +2212,24 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 	if level > StackAlarmLevel {
 		blah = 1
 	}
+	var browxPtr *int
+	if browx != nil {
+		switch v := browx.(type) {
+		case int:
+			browxPtr = &v
+		case *int:
+			browxPtr = v
+		}
+	}
+	var bcolxPtr *int
+	if bcolx != nil {
+		switch v := bcolx.(type) {
+		case int:
+			bcolxPtr = &v
+		case *int:
+			bcolxPtr = v
+		}
+	}
 	reldelta := 0
 	if fmlatype&(FmlaTypeShared|FmlaTypeName|FmlaTypeCondFmt|FmlaTypeDataVal) != 0 {
 		reldelta = 1
@@ -2791,7 +2807,7 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 			}
 			spush(resOp)
 		} else if opcode == 0x06 { // tMemArea
-			panic("tMemArea not implemented")
+			// Not used for decompiling; skip.
 		} else if opcode == 0x09 { // tMemFunc
 			nb, _ := unpack("<H", data[pos+1:pos+3])
 			if blah != 0 {
@@ -2799,9 +2815,37 @@ func DecompileFormula(bk *Book, fmla []byte, fmlalen int, fmlatype int, browx, b
 			}
 			// no effect on stack
 		} else if opcode == 0x0C { // tRefN
-			panic("tRefN not implemented")
+			rowx, colx, rowRel, colRel := getCellAddr(data, pos+1, bv, reldelta, browx, bcolx)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "   %v %v %v %v\n", rowx, colx, rowRel, colRel)
+			}
+			anyRel = boolToInt(anyRel != 0 || rowRel != 0 || colRel != 0)
+			okind := oREF
+			if rowRel != 0 || colRel != 0 {
+				okind = oREL
+			}
+			otext := cellnamerel(rowx, colx, rowRel, colRel, browxPtr, bcolxPtr, r1c1)
+			resOp := &Operand{kind: okind, value: nil, _rank: LeafRank, text: otext}
+			spush(resOp)
 		} else if opcode == 0x0D { // tAreaN
-			panic("tAreaN not implemented")
+			res1, res2 := getCellRangeAddr(data, pos+1, bv, reldelta, browx, bcolx)
+			if blah != 0 {
+				fmt.Fprintf(bk.logfile, "  %v %v\n", res1, res2)
+			}
+			rowx1, colx1, rowRel1, colRel1 := res1[0], res1[1], res1[2], res1[3]
+			rowx2, colx2, rowRel2, colRel2 := res2[0], res2[1], res2[2], res2[3]
+			coords := []int{rowx1, rowx2 + 1, colx1, colx2 + 1}
+			relflags := []int{rowRel1, rowRel2, colRel1, colRel2}
+			if rowRel1 != 0 || colRel1 != 0 || rowRel2 != 0 || colRel2 != 0 {
+				anyRel = 1
+			}
+			okind := oREF
+			if relflags[0] != 0 || relflags[1] != 0 || relflags[2] != 0 || relflags[3] != 0 {
+				okind = oREL
+			}
+			otext := rangename2drel(coords, relflags, browxPtr, bcolxPtr, r1c1)
+			resOp := &Operand{kind: okind, value: nil, _rank: LeafRank, text: otext}
+			spush(resOp)
 		} else if opcode == 0x1A { // tRef3d
 			var refx int
 			var shx1, shx2 int
