@@ -63,6 +63,9 @@ https://github.com/dilshod/xlsx2csv.
 go install github.com/yamitzky/xlrd-go/cmd/xls2csv@latest
 ```
 
+Or download prebuilt binaries from GitHub Releases and put `xls2csv` on your
+`PATH`.
+
 ```bash
 xls2csv -s 1 input.xls output.csv
 xls2csv -a input.xls
